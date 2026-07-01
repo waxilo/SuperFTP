@@ -360,7 +360,9 @@ export default function App() {
     [session],
   );
 
-  // Ctrl+F / Esc handlers — only meaningful while connected.
+  // Ctrl+F opens the filter. Esc is a stacked-modal close: viewer first,
+  // then any open right-click menu, then the filter bar. Closing the filter
+  // keeps the current filter text so reopening (Ctrl+F) restores it.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       const isFind = (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f";
@@ -368,14 +370,23 @@ export default function App() {
         if (!session) return;
         e.preventDefault();
         setFilterOpen(true);
-      } else if (e.key === "Escape" && filterOpen) {
+        return;
+      }
+      if (e.key !== "Escape") return;
+
+      if (viewer) {
+        setViewer(null);
+      } else if (menu) {
+        setMenu(null);
+      } else if (localMenu) {
+        setLocalMenu(null);
+      } else if (filterOpen) {
         setFilterOpen(false);
-        setFilter("");
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [filterOpen, session]);
+  }, [filterOpen, session, viewer, menu, localMenu]);
 
   const matchedCount = useMemo(() => {
     if (!filter.trim()) return entries.length;
@@ -550,10 +561,9 @@ export default function App() {
             matched={matchedCount}
             total={entries.length}
             onChange={setFilter}
-            onClose={() => {
-              setFilterOpen(false);
-              setFilter("");
-            }}
+            // Keep the filter text so reopening (Ctrl+F) restores the last
+            // query. Users who want to clear can just backspace it.
+            onClose={() => setFilterOpen(false)}
           />
         )}
 
