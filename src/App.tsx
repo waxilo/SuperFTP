@@ -388,10 +388,15 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [filterOpen, session, viewer, menu, localMenu]);
 
+  // The filter state persists across close/reopen, but must only actually
+  // filter the list while the bar is visible. Everything downstream reads
+  // this instead of `filter` directly.
+  const effectiveFilter = filterOpen ? filter : "";
+
   const matchedCount = useMemo(() => {
-    if (!filter.trim()) return entries.length;
-    return entries.filter((e) => matchesFilter(e.name, filter)).length;
-  }, [entries, filter]);
+    if (!effectiveFilter.trim()) return entries.length;
+    return entries.filter((e) => matchesFilter(e.name, effectiveFilter)).length;
+  }, [entries, effectiveFilter]);
 
   // ----- Local: open with system default app -----------------------------
   const handleOpenLocal = useCallback(async (entry: LocalEntry) => {
@@ -593,7 +598,7 @@ export default function App() {
             canGoUp={session.cwd !== "/" && session.cwd !== ""}
             onOpen={openEntry}
             onGoUp={goUp}
-            filter={filter}
+            filter={effectiveFilter}
             onContextMenu={(entry, x, y) => setMenu({ entry, x, y })}
           />
         )}
