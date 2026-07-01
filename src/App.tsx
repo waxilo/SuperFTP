@@ -238,6 +238,11 @@ export default function App() {
   const navigateTo = useCallback(
     (path: string) => {
       if (!session) return;
+      // Filtering is inherently per-directory — the query and match count
+      // don't carry meaning after you leave the folder. Close the bar so it
+      // doesn't linger over an unrelated listing. Filter text is kept so
+      // Ctrl+F still restores the last query if the user wants it back.
+      setFilterOpen(false);
       refreshAt(session.sessionId, path);
     },
     [refreshAt, session],
