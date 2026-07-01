@@ -133,10 +133,13 @@ pub async fn list_dir(holder: &mut SftpHolder, path: &str) -> FtpResult<ListResu
         .map(|e| dir_entry_to_file(e, &canon))
         .collect();
 
+    // Only group directories above files — leave server order intact
+    // within each group so the frontend's ascending/descending sort is
+    // visibly different from the "default" (unsorted) state.
     entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
         (true, false) => std::cmp::Ordering::Less,
         (false, true) => std::cmp::Ordering::Greater,
-        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        _ => std::cmp::Ordering::Equal,
     });
 
     holder.cwd = canon.clone();
@@ -165,6 +168,28 @@ pub async fn download(
         .flush()
         .await
         .map_err(|e| FtpError::Protocol(format!("Local I/O error: {e}")))?;
+    Ok(())
+}
+
+/// Stream a local file up to the remote server. The remote file is
+/// created (or overwritten if it already exists).
+pub async fn upload(
+    holder: &mut SftpHolder,
+    local_path: &Path,
+    remote_path: &str,
+) -> FtpResult<()> {
+    let target = resolve_path(&holder.cwd, remote_path);
+    let mut local = tokio::fs::File::open(local_path)
+        .await
+        .map_err(|e| FtpError::Protocol(format!("Local I/O error: {e}")))?;
+    let mut remote = holder.sftp.create(&target).await.map_err(map_sftp)?;
+    tokio::io::copy(&mut local, &mut remote)
+        .await
+        .map_err(|e| FtpError::Protocol(format!("Transfer failed: {e}")))?;
+    remote
+        .flush()
+        .await
+        .map_err(|e| FtpError::Protocol(format!("Transfer failed: {e}")))?;
     Ok(())
 }
 

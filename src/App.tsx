@@ -39,6 +39,12 @@ interface MenuState {
   entry: FileEntry;
 }
 
+interface LocalMenuState {
+  x: number;
+  y: number;
+  entry: LocalEntry;
+}
+
 interface ViewerState {
   /** Remote filename used as the modal title. */
   name: string;
@@ -80,6 +86,9 @@ export default function App() {
 
   // -- right-click menu on a remote file row
   const [menu, setMenu] = useState<MenuState | null>(null);
+
+  // -- right-click menu on a local file row
+  const [localMenu, setLocalMenu] = useState<LocalMenuState | null>(null);
 
   // -- in-app text preview of a remote file
   const [viewer, setViewer] = useState<ViewerState | null>(null);
@@ -131,6 +140,17 @@ export default function App() {
       .then((home) => refreshLocalAt(home))
       .catch((e) => setLocalError(String(e)));
   }, [refreshLocalAt]);
+
+  // Reveal the current local directory in the OS file manager (Explorer on
+  // Windows, Finder on macOS). `openPath` accepts both files and directories.
+  const openLocalCwd = useCallback(async () => {
+    if (!localCwd) return;
+    try {
+      await openPath(localCwd);
+    } catch (e) {
+      setLocalError(String(e));
+    }
+  }, [localCwd]);
 
   const refreshAt = useCallback(
     async (sessionId: string, path: string) => {
@@ -362,6 +382,74 @@ export default function App() {
     return entries.filter((e) => matchesFilter(e.name, filter)).length;
   }, [entries, filter]);
 
+  // ----- Local: open with system default app -----------------------------
+  const handleOpenLocal = useCallback(async (entry: LocalEntry) => {
+    setError(null);
+    try {
+      await openPath(entry.path);
+      setStatus(`Opened ${entry.name}`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
+  // ----- Local: open as text in the in-app viewer -------------------------
+  const handleOpenLocalAsText = useCallback(async (entry: LocalEntry) => {
+    if (entry.is_dir) return;
+    setError(null);
+    setViewer({
+      name: entry.name,
+      content: null,
+      error: null,
+      truncated: false,
+      size: 0,
+    });
+    try {
+      const result = await localApi.readText(entry.path);
+      setViewer({
+        name: entry.name,
+        content: result.content,
+        error: null,
+        truncated: result.truncated,
+        size: result.size,
+      });
+    } catch (e) {
+      setViewer({
+        name: entry.name,
+        content: "",
+        error: String(e),
+        truncated: false,
+        size: 0,
+      });
+    }
+  }, []);
+
+  // ----- Local → remote upload -------------------------------------------
+  // Uses the remote session's current directory as the destination, matching
+  // how the remote → local "Send" action uses the local panel's cwd.
+  const handleUpload = useCallback(
+    async (entry: LocalEntry) => {
+      if (!session) {
+        setError("Not connected to a server.");
+        return;
+      }
+      if (entry.is_dir) {
+        setError("Uploading whole folders isn't supported yet.");
+        return;
+      }
+      setError(null);
+      try {
+        const written = await ftpApi.upload(session.sessionId, entry.path, session.cwd);
+        setStatus(`Uploaded to ${written}`);
+        // Refresh the remote panel so the new file appears immediately.
+        refreshAt(session.sessionId, session.cwd);
+      } catch (e) {
+        setError(String(e));
+      }
+    },
+    [session, refreshAt],
+  );
+
   // Build the context menu items lazily so the destination is always up-to-
   // date when the user clicks (they may have navigated locally first).
   const menuItems = useMemo<ContextMenuItem[]>(() => {
@@ -387,6 +475,32 @@ export default function App() {
     ];
   }, [menu, localCwd, handleSend, handleOpenDefault, handleOpenAsText]);
 
+  const localMenuItems = useMemo<ContextMenuItem[]>(() => {
+    if (!localMenu) return [];
+    const isDir = localMenu.entry.is_dir;
+    const remoteTarget = session?.cwd ?? "(not connected)";
+    return [
+      {
+        label: "Open",
+        onSelect: () => handleOpenLocal(localMenu.entry),
+      },
+      {
+        label: "Open as Text",
+        onSelect: () => handleOpenLocalAsText(localMenu.entry),
+        disabled: isDir,
+      },
+      {
+        label: isDir
+          ? "Send to FTP (folders not supported)"
+          : session
+            ? `Send to FTP → ${remoteTarget}`
+            : "Send to FTP (not connected)",
+        onSelect: () => handleUpload(localMenu.entry),
+        disabled: isDir || !session,
+      },
+    ];
+  }, [localMenu, session, handleOpenLocal, handleOpenLocalAsText, handleUpload]);
+
   return (
     <div className="app">
       <aside className="sidebar">
@@ -408,6 +522,8 @@ export default function App() {
           onNavigate={refreshLocalAt}
           onGoHome={() => localApi.home().then(refreshLocalAt)}
           onRefresh={() => localCwd && refreshLocalAt(localCwd)}
+          onOpenInSystem={openLocalCwd}
+          onContextMenu={(entry, x, y) => setLocalMenu({ entry, x, y })}
         />
       </aside>
 
@@ -479,6 +595,15 @@ export default function App() {
           y={menu.y}
           items={menuItems}
           onClose={() => setMenu(null)}
+        />
+      )}
+
+      {localMenu && (
+        <ContextMenu
+          x={localMenu.x}
+          y={localMenu.y}
+          items={localMenuItems}
+          onClose={() => setLocalMenu(null)}
         />
       )}
 

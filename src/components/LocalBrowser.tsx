@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import {
   CornerUpLeft,
   Folder,
+  FolderOpen,
   FileText,
   Home,
   RefreshCcw,
@@ -19,6 +20,8 @@ interface Props {
   onNavigate: (path: string) => void;
   onGoHome: () => void;
   onRefresh: () => void;
+  onOpenInSystem: () => void;
+  onContextMenu?: (entry: LocalEntry, x: number, y: number) => void;
 }
 
 /** Return the parent directory of an absolute path (forward-slash form),
@@ -44,6 +47,8 @@ export function LocalBrowser({
   onNavigate,
   onGoHome,
   onRefresh,
+  onOpenInSystem,
+  onContextMenu,
 }: Props) {
   const [filter, setFilter] = useState("");
 
@@ -59,6 +64,14 @@ export function LocalBrowser({
       <div className="local-header">
         <div className="local-title">Local</div>
         <div className="local-actions">
+          <button
+            className="icon-btn small"
+            onClick={onOpenInSystem}
+            disabled={!cwd}
+            title="Open in system file manager"
+          >
+            <FolderOpen size={13} />
+          </button>
           <button
             className="icon-btn small"
             onClick={onGoHome}
@@ -143,8 +156,15 @@ export function LocalBrowser({
               <button
                 className={`local-item ${entry.is_dir ? "" : "file"}`}
                 onDoubleClick={() => entry.is_dir && onNavigate(entry.path)}
+                onContextMenu={(e) => {
+                  if (!onContextMenu) return;
+                  e.preventDefault();
+                  onContextMenu(entry, e.clientX, e.clientY);
+                }}
                 title={entry.path}
-                disabled={!entry.is_dir}
+                // Files are not clickable/navigable, but stay enabled so the
+                // right-click event still fires (disabled buttons don't emit
+                // contextmenu events on all browsers).
               >
                 <Icon size={14} className={`icon ${entry.is_dir ? "dir" : "file"}`} />
                 <span>{entry.name}</span>

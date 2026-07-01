@@ -225,10 +225,14 @@ async fn list_dir_ftp(stream: &mut AsyncFtpStream, path: &str) -> FtpResult<List
         .filter(|entry| entry.name != "." && entry.name != "..")
         .collect();
 
+    // Only group directories above files. We deliberately don't sort by
+    // name here so the frontend's "default" state is distinguishable from
+    // its explicit name-ascending sort. `sort_by` is stable, so the raw
+    // server order within each group is preserved.
     entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
         (true, false) => std::cmp::Ordering::Less,
         (false, true) => std::cmp::Ordering::Greater,
-        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        _ => std::cmp::Ordering::Equal,
     });
 
     Ok(ListResult {

@@ -42,6 +42,10 @@ export const ftpApi = {
    *  absolute local path. Used by the "Open" action. */
   openTemp: (sessionId: string, remotePath: string) =>
     invoke<string>("ftp_open_temp", { sessionId, remotePath }),
+  /** Upload a local file into `remoteDir` on the active session. Returns
+   *  the resolved remote path that was written. */
+  upload: (sessionId: string, localPath: string, remoteDir: string) =>
+    invoke<string>("ftp_upload", { sessionId, localPath, remoteDir }),
   /** Fetch a remote file's content as text (UTF-8 lossy), capped at
    *  `maxBytes` (defaults to 4 MiB in the backend). */
   readText: (sessionId: string, remotePath: string, maxBytes?: number) =>

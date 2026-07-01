@@ -125,6 +125,63 @@ async fn download_ftp(
     Ok(())
 }
 
+/// Upload a single local file into `remote_dir`. The remote filename is the
+/// basename of `local_path`, mirroring standard "put" semantics. Existing
+/// remote files with the same name are overwritten — the caller (right-click
+/// → Send) is an explicit user action so overwrite is the least surprising
+/// outcome. Returns the resolved remote path that was written.
+pub async fn upload(
+    state: &FtpState,
+    session_id: &str,
+    local_path: &str,
+    remote_dir: &str,
+) -> FtpResult<String> {
+    let local = PathBuf::from(local_path);
+    if !local.is_file() {
+        return Err(FtpError::Protocol(format!(
+            "Local source is not a regular file: {local_path}"
+        )));
+    }
+    let filename = local
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| FtpError::Protocol(format!("Invalid local path: {local_path}")))?
+        .to_string();
+
+    let remote_path = if remote_dir.ends_with('/') || remote_dir.is_empty() {
+        format!("{remote_dir}{filename}")
+    } else {
+        format!("{remote_dir}/{filename}")
+    };
+
+    let mut sessions = state.sessions.lock().await;
+    let session = sessions
+        .get_mut(session_id)
+        .ok_or_else(|| FtpError::SessionNotFound(session_id.to_string()))?;
+
+    match session {
+        Session::Ftp(stream) => upload_ftp(stream, &local, &remote_path).await?,
+        Session::Sftp(holder) => crate::sftp::upload(holder, &local, &remote_path).await?,
+    }
+
+    Ok(remote_path)
+}
+
+async fn upload_ftp(
+    stream: &mut suppaftp::tokio::AsyncFtpStream,
+    local_path: &Path,
+    remote_path: &str,
+) -> FtpResult<()> {
+    let mut file = tokio::fs::File::open(local_path).await.map_err(io_err)?;
+    let mut data = stream.put_with_stream(remote_path).await?;
+    tokio::io::copy(&mut file, &mut data).await.map_err(io_err)?;
+    data.flush().await.map_err(io_err)?;
+    // Same reasoning as retr: signal STOR completion so the server can
+    // return its final response and the next command sees a fresh state.
+    stream.finalize_put_stream(data).await?;
+    Ok(())
+}
+
 fn io_err(e: std::io::Error) -> FtpError {
     FtpError::Protocol(format!("Local I/O error: {e}"))
 }

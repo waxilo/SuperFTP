@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::transfer::ReadTextResult;
+
 #[derive(thiserror::Error, Debug)]
 pub enum LocalError {
     #[error("{0}")]
@@ -110,6 +112,27 @@ pub fn list_dir(path: &str) -> LocalResult<LocalListResult> {
     });
 
     Ok(LocalListResult { cwd, entries })
+}
+
+/// Read a local file and return its contents as text (UTF-8, lossy).
+/// Anything past `max_bytes` is dropped so a misclick on a huge file
+/// doesn't stall the UI thread. Mirrors the shape of `transfer::read_text`
+/// so the frontend can render both through the same viewer.
+pub fn read_text(path: &str, max_bytes: usize) -> LocalResult<ReadTextResult> {
+    let bytes = std::fs::read(path)?;
+    let size = bytes.len() as u64;
+    let truncated = bytes.len() > max_bytes;
+    let slice = if truncated {
+        &bytes[..max_bytes]
+    } else {
+        &bytes[..]
+    };
+    let content = String::from_utf8_lossy(slice).into_owned();
+    Ok(ReadTextResult {
+        content,
+        size,
+        truncated,
+    })
 }
 
 /// Convert a path to a UTF-8 string with forward slashes. On Windows the

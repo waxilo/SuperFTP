@@ -443,6 +443,42 @@ kbd {
   border-bottom: 1px solid var(--border);
 }
 
+/* Sortable-header button. Sits inside a <th> and inherits the header's
+   typography, adding a chevron indicator on the right. Clicking cycles the
+   sort direction; see FileList.tsx for the state machine. */
+.th-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+
+.th-sort:hover {
+  color: var(--text);
+}
+
+.th-sort.active {
+  color: var(--text);
+}
+
+.th-sort .sort-icon {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.th-sort .sort-icon.dim {
+  color: var(--text-dim);
+  opacity: 0.6;
+}
+
 .file-table tbody tr.row {
   cursor: default;
   border-bottom: 1px solid transparent;
@@ -745,6 +781,7 @@ kbd {
   align-items: center;
   justify-content: space-between;
   padding: 12px 14px 6px;
+  flex-shrink: 0;
 }
 
 .local-title {
@@ -760,7 +797,14 @@ kbd {
 }
 
 .local-cwd {
-  padding: 0 14px 6px;
+  /* Extra vertical padding + fixed line-height so the row reserves its own
+     space and never gets visually clipped by the filter box below.
+     `flex-shrink: 0` is critical — this element lives in a flex column
+     with `min-height: 0` on the list, and without it the cwd row can be
+     squeezed shorter than its glyphs (descenders end up cut off). */
+  flex-shrink: 0;
+  padding: 4px 14px 8px;
+  line-height: 1.5;
   font-size: 11px;
   color: var(--text-muted);
   white-space: nowrap;
@@ -799,6 +843,14 @@ kbd {
 }
 
 .local-item:disabled {
+  cursor: default;
+  color: var(--text-muted);
+}
+
+/* Files aren't navigable (no double-click behavior), so mute their color to
+   match how disabled dirs used to look, while keeping the button enabled so
+   right-click still fires. */
+.local-item.file {
   cursor: default;
   color: var(--text-muted);
 }
@@ -866,8 +918,9 @@ kbd {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin: 2px 14px 8px;
-  padding: 4px 8px;
+  margin: 4px 14px 8px;
+  padding: 5px 8px;
+  flex-shrink: 0;
   background: var(--bg);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);

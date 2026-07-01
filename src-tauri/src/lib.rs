@@ -85,6 +85,25 @@ fn local_list(path: String) -> LocalResult<LocalListResult> {
     local::list_dir(&path)
 }
 
+/// Read a local file as text (capped at `max_bytes`, defaulting to 4 MiB).
+#[tauri::command]
+fn local_read_text(path: String, max_bytes: Option<usize>) -> LocalResult<ReadTextResult> {
+    let cap = max_bytes.unwrap_or(4 * 1024 * 1024);
+    local::read_text(&path, cap)
+}
+
+/// Upload a local file into `remote_dir` on the active session. Returns
+/// the resolved remote path that was written.
+#[tauri::command]
+async fn ftp_upload(
+    state: State<'_, FtpState>,
+    session_id: String,
+    local_path: String,
+    remote_dir: String,
+) -> FtpResult<String> {
+    transfer::upload(state.inner(), &session_id, &local_path, &remote_dir).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -97,10 +116,12 @@ pub fn run() {
             ftp_list,
             ftp_cd,
             ftp_download,
+            ftp_upload,
             ftp_open_temp,
             ftp_read_text,
             local_home,
             local_list,
+            local_read_text,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
