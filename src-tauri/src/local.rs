@@ -135,6 +135,21 @@ pub fn read_text(path: &str, max_bytes: usize) -> LocalResult<ReadTextResult> {
     })
 }
 
+/// Delete a local path. Files use `remove_file`; directories are removed
+/// recursively (with all contents) via `remove_dir_all`. The caller is
+/// responsible for confirming the destructive action with the user before
+/// dispatching this command.
+pub fn delete_path(path: &str) -> LocalResult<()> {
+    let p = PathBuf::from(path);
+    let meta = std::fs::metadata(&p)?;
+    if meta.is_dir() {
+        std::fs::remove_dir_all(&p)?;
+    } else {
+        std::fs::remove_file(&p)?;
+    }
+    Ok(())
+}
+
 /// Convert a path to a UTF-8 string with forward slashes. On Windows the
 /// `\\?\` extended-length prefix is stripped because the UI displays the
 /// path verbatim and the prefix looks alarming to users.

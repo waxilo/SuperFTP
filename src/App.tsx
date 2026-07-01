@@ -105,6 +105,18 @@ export default function App() {
     return () => window.clearTimeout(t);
   }, [status]);
 
+  // Suppress the browser's default context menu everywhere. The two file
+  // lists (local sidebar bottom, remote right pane) install their own
+  // `onContextMenu` handlers on file rows, which call `preventDefault` and
+  // then show our custom menu — so they keep working. This global listener
+  // only prevents the fallback browser menu from appearing on empty areas,
+  // headers, breadcrumbs, banners, etc.
+  useEffect(() => {
+    const onContextMenu = (e: MouseEvent) => e.preventDefault();
+    window.addEventListener("contextmenu", onContextMenu);
+    return () => window.removeEventListener("contextmenu", onContextMenu);
+  }, []);
+
   // Load saved profiles on mount.
   useEffect(() => {
     loadProfiles()
@@ -440,6 +452,51 @@ export default function App() {
     }
   }, []);
 
+  // ----- Delete a remote entry -------------------------------------------
+  // Confirmation via `window.confirm` is deliberately minimal; delete is
+  // destructive but the user just picked the entry via right-click, so a
+  // heavier custom modal would feel out of place. Folders trigger a more
+  // explicit "and all its contents" prompt since the backend recurses.
+  const handleDeleteRemote = useCallback(
+    async (entry: FileEntry) => {
+      if (!session) return;
+      const prompt = entry.is_dir
+        ? `Delete remote folder "${entry.name}" and all its contents?\nThis cannot be undone.`
+        : `Delete remote file "${entry.name}"?`;
+      const ok = window.confirm(prompt);
+      if (!ok) return;
+      setError(null);
+      try {
+        await ftpApi.delete(session.sessionId, entry.path, entry.is_dir);
+        setStatus(`Deleted ${entry.name}`);
+        refreshAt(session.sessionId, session.cwd);
+      } catch (e) {
+        setError(String(e));
+      }
+    },
+    [session, refreshAt],
+  );
+
+  // ----- Delete a local entry --------------------------------------------
+  const handleDeleteLocal = useCallback(
+    async (entry: LocalEntry) => {
+      const prompt = entry.is_dir
+        ? `Delete local folder "${entry.name}" and all its contents?\nThis cannot be undone.`
+        : `Delete local file "${entry.name}"?`;
+      const ok = window.confirm(prompt);
+      if (!ok) return;
+      setLocalError(null);
+      try {
+        await localApi.delete(entry.path);
+        setStatus(`Deleted ${entry.name}`);
+        if (localCwd) refreshLocalAt(localCwd);
+      } catch (e) {
+        setLocalError(String(e));
+      }
+    },
+    [localCwd, refreshLocalAt],
+  );
+
   // ----- Local → remote upload -------------------------------------------
   // Uses the remote session's current directory as the destination, matching
   // how the remote → local "Send" action uses the local panel's cwd.
@@ -488,8 +545,19 @@ export default function App() {
         onSelect: () => handleSend(menu.entry),
         disabled: isDir || !localCwd,
       },
+      {
+        label: isDir ? "Delete folder…" : "Delete",
+        onSelect: () => handleDeleteRemote(menu.entry),
+      },
     ];
-  }, [menu, localCwd, handleSend, handleOpenDefault, handleOpenAsText]);
+  }, [
+    menu,
+    localCwd,
+    handleSend,
+    handleOpenDefault,
+    handleOpenAsText,
+    handleDeleteRemote,
+  ]);
 
   const localMenuItems = useMemo<ContextMenuItem[]>(() => {
     if (!localMenu) return [];
@@ -514,8 +582,19 @@ export default function App() {
         onSelect: () => handleUpload(localMenu.entry),
         disabled: isDir || !session,
       },
+      {
+        label: isDir ? "Delete folder…" : "Delete",
+        onSelect: () => handleDeleteLocal(localMenu.entry),
+      },
     ];
-  }, [localMenu, session, handleOpenLocal, handleOpenLocalAsText, handleUpload]);
+  }, [
+    localMenu,
+    session,
+    handleOpenLocal,
+    handleOpenLocalAsText,
+    handleUpload,
+    handleDeleteLocal,
+  ]);
 
   return (
     <div className="app">
@@ -560,18 +639,6 @@ export default function App() {
           </div>
         </header>
 
-        {filterOpen && (
-          <FilterBar
-            value={filter}
-            matched={matchedCount}
-            total={entries.length}
-            onChange={setFilter}
-            // Keep the filter text so reopening (Ctrl+F) restores the last
-            // query. Users who want to clear can just backspace it.
-            onClose={() => setFilterOpen(false)}
-          />
-        )}
-
         {error && <div className="banner error">{error}</div>}
         {status && <div className="banner success">{status}</div>}
 
@@ -600,6 +667,21 @@ export default function App() {
             onGoUp={goUp}
             filter={effectiveFilter}
             onContextMenu={(entry, x, y) => setMenu({ entry, x, y })}
+          />
+        )}
+
+        {/* Filter bar lives at the bottom of the right pane so it feels
+            like a search HUD anchored to the window edge, similar to the
+            in-page find bars in most browsers. */}
+        {filterOpen && (
+          <FilterBar
+            value={filter}
+            matched={matchedCount}
+            total={entries.length}
+            onChange={setFilter}
+            // Keep the filter text so reopening (Ctrl+F) restores the last
+            // query. Users who want to clear can just backspace it.
+            onClose={() => setFilterOpen(false)}
           />
         )}
       </main>

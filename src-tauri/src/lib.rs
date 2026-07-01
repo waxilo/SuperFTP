@@ -104,6 +104,25 @@ async fn ftp_upload(
     transfer::upload(state.inner(), &session_id, &local_path, &remote_dir).await
 }
 
+/// Delete a remote entry. Files are removed directly; directories are
+/// removed recursively. The frontend passes `is_dir` since it already knows
+/// from the right-clicked entry.
+#[tauri::command]
+async fn ftp_delete(
+    state: State<'_, FtpState>,
+    session_id: String,
+    remote_path: String,
+    is_dir: bool,
+) -> FtpResult<()> {
+    transfer::delete_remote(state.inner(), &session_id, &remote_path, is_dir).await
+}
+
+/// Delete a local path (file or directory, recursive for directories).
+#[tauri::command]
+fn local_delete(path: String) -> LocalResult<()> {
+    local::delete_path(&path)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -117,11 +136,13 @@ pub fn run() {
             ftp_cd,
             ftp_download,
             ftp_upload,
+            ftp_delete,
             ftp_open_temp,
             ftp_read_text,
             local_home,
             local_list,
             local_read_text,
+            local_delete,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

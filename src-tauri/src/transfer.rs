@@ -125,6 +125,86 @@ async fn download_ftp(
     Ok(())
 }
 
+/// Delete a remote entry. Files are removed directly; directories are
+/// removed recursively (contents first, then the empty dir itself). The
+/// caller passes `is_dir` because computing it server-side would cost an
+/// extra round trip and the frontend already knows from the entry it just
+/// right-clicked.
+pub async fn delete_remote(
+    state: &FtpState,
+    session_id: &str,
+    remote_path: &str,
+    is_dir: bool,
+) -> FtpResult<()> {
+    let mut sessions = state.sessions.lock().await;
+    let session = sessions
+        .get_mut(session_id)
+        .ok_or_else(|| FtpError::SessionNotFound(session_id.to_string()))?;
+
+    match session {
+        Session::Ftp(stream) => {
+            if is_dir {
+                delete_dir_recursive_ftp(stream, remote_path).await?;
+            } else {
+                stream.rm(remote_path).await?;
+            }
+        }
+        Session::Sftp(holder) => {
+            if is_dir {
+                crate::sftp::delete_dir_recursive(holder, remote_path).await?;
+            } else {
+                crate::sftp::delete_file(holder, remote_path).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Recursively delete an FTP directory. Boxed so the future is `Sized`,
+/// which async recursion requires.
+fn delete_dir_recursive_ftp<'a>(
+    stream: &'a mut suppaftp::tokio::AsyncFtpStream,
+    path: &'a str,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = FtpResult<()>> + Send + 'a>> {
+    Box::pin(async move {
+        // Walk into the dir, list its contents, then remove children and the
+        // dir itself. Using the CWD-then-LIST pattern matches list_dir_ftp;
+        // some servers reject `LIST <path>` directly.
+        stream.cwd(path).await?;
+        let pwd = stream.pwd().await.unwrap_or_else(|_| path.to_string());
+        let lines = stream.list(None).await?;
+
+        let entries: Vec<crate::ftp::FileEntry> = lines
+            .iter()
+            .filter_map(|l| crate::ftp::parse_ftp_line(l, &pwd))
+            .filter(|e| e.name != "." && e.name != "..")
+            .collect();
+
+        // Delete plain files first; recursing into subdirs afterwards leaves
+        // the state predictable (we're back at `pwd` when the recursive call
+        // returns, because it CDs to its own parent before rmdir'ing itself).
+        for entry in &entries {
+            if !entry.is_dir {
+                stream.rm(&entry.path).await?;
+            }
+        }
+        for entry in &entries {
+            if entry.is_dir {
+                delete_dir_recursive_ftp(stream, &entry.path).await?;
+            }
+        }
+
+        // Must not be sitting inside the dir we're about to remove.
+        let parent = pwd
+            .rsplit_once('/')
+            .map(|(p, _)| if p.is_empty() { "/" } else { p })
+            .unwrap_or("/");
+        stream.cwd(parent).await?;
+        stream.rmdir(&pwd).await?;
+        Ok(())
+    })
+}
+
 /// Upload a single local file into `remote_dir`. The remote filename is the
 /// basename of `local_path`, mirroring standard "put" semantics. Existing
 /// remote files with the same name are overwritten — the caller (right-click

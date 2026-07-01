@@ -248,7 +248,7 @@ async fn change_dir_ftp(stream: &mut AsyncFtpStream, path: &str) -> FtpResult<St
     Ok(cwd)
 }
 
-fn parse_ftp_line(line: &str, cwd: &str) -> Option<FileEntry> {
+pub(crate) fn parse_ftp_line(line: &str, cwd: &str) -> Option<FileEntry> {
     let parsed: Result<FtpFile, _> = line.parse();
     let Ok(file) = parsed else {
         return None;

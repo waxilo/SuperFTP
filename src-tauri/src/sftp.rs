@@ -171,6 +171,54 @@ pub async fn download(
     Ok(())
 }
 
+/// Delete a single remote file. `path` may be relative to the current
+/// session cwd. Directories are not accepted — callers must gate on the
+/// entry type before invoking this.
+pub async fn delete_file(holder: &mut SftpHolder, path: &str) -> FtpResult<()> {
+    let target = resolve_path(&holder.cwd, path);
+    holder.sftp.remove_file(&target).await.map_err(map_sftp)
+}
+
+/// Recursively delete an SFTP directory. Contents are removed before the
+/// dir itself. Boxed for async recursion.
+pub fn delete_dir_recursive<'a>(
+    holder: &'a mut SftpHolder,
+    path: &'a str,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = FtpResult<()>> + Send + 'a>> {
+    Box::pin(async move {
+        let target = resolve_path(&holder.cwd, path);
+        let canon = holder
+            .sftp
+            .canonicalize(&target)
+            .await
+            .map_err(map_sftp)?;
+
+        // Collect first so we release the borrow on `holder.sftp` before the
+        // loop, letting us call `holder.sftp.remove_*` inside it.
+        let children: Vec<(String, bool)> = holder
+            .sftp
+            .read_dir(&canon)
+            .await
+            .map_err(map_sftp)?
+            .into_iter()
+            .filter(|e| e.file_name() != "." && e.file_name() != "..")
+            .map(|e| (e.file_name(), e.metadata().is_dir()))
+            .collect();
+
+        for (name, is_dir) in children {
+            let child = join_path(&canon, &name);
+            if is_dir {
+                delete_dir_recursive(holder, &child).await?;
+            } else {
+                holder.sftp.remove_file(&child).await.map_err(map_sftp)?;
+            }
+        }
+
+        holder.sftp.remove_dir(&canon).await.map_err(map_sftp)?;
+        Ok(())
+    })
+}
+
 /// Stream a local file up to the remote server. The remote file is
 /// created (or overwritten if it already exists).
 pub async fn upload(
