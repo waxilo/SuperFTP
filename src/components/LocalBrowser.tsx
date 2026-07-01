@@ -5,6 +5,7 @@ import {
   FolderOpen,
   FileText,
   Home,
+  Loader2,
   RefreshCcw,
   Search,
   X,
@@ -16,7 +17,6 @@ interface Props {
   cwd: string;
   entries: LocalEntry[];
   loading: boolean;
-  error: string | null;
   onNavigate: (path: string) => void;
   onGoHome: () => void;
   onRefresh: () => void;
@@ -43,7 +43,6 @@ export function LocalBrowser({
   cwd,
   entries,
   loading,
-  error,
   onNavigate,
   onGoHome,
   onRefresh,
@@ -128,51 +127,61 @@ export function LocalBrowser({
         )}
       </div>
 
-      {error && <div className="banner error small">{error}</div>}
-
-      <ul className="local-list">
-        {/* Hide ".." while filtering — the user is searching, not navigating. */}
-        {canGoUp && !filter && (
-          <li>
-            <button
-              className="local-item"
-              onDoubleClick={() => onNavigate(parentOf(cwd))}
-              title="Double-click to go up"
-            >
-              <CornerUpLeft size={14} className="icon dir" />
-              <span>..</span>
-            </button>
-          </li>
-        )}
-        {filtered.length === 0 && !loading && (
-          <li className="empty-hint small">
-            {filter ? `No matches for "${filter}"` : canGoUp ? "" : "Empty"}
-          </li>
-        )}
-        {filtered.map((entry) => {
-          const Icon = entry.is_dir ? Folder : FileText;
-          return (
-            <li key={entry.path}>
+      {/* Wrapper is `position: relative` so the loading mask can overlay
+          just the file list without covering the header / cwd / filter. */}
+      <div className="local-list-wrap">
+        <ul className="local-list">
+          {/* Hide ".." while filtering — the user is searching, not navigating. */}
+          {canGoUp && !filter && (
+            <li>
               <button
-                className={`local-item ${entry.is_dir ? "" : "file"}`}
-                onDoubleClick={() => entry.is_dir && onNavigate(entry.path)}
-                onContextMenu={(e) => {
-                  if (!onContextMenu) return;
-                  e.preventDefault();
-                  onContextMenu(entry, e.clientX, e.clientY);
-                }}
-                title={entry.path}
-                // Files are not clickable/navigable, but stay enabled so the
-                // right-click event still fires (disabled buttons don't emit
-                // contextmenu events on all browsers).
+                className="local-item"
+                onDoubleClick={() => onNavigate(parentOf(cwd))}
+                title="Double-click to go up"
               >
-                <Icon size={14} className={`icon ${entry.is_dir ? "dir" : "file"}`} />
-                <span>{entry.name}</span>
+                <CornerUpLeft size={14} className="icon dir" />
+                <span>..</span>
               </button>
             </li>
-          );
-        })}
-      </ul>
+          )}
+          {filtered.length === 0 && !loading && (
+            <li className="empty-hint small">
+              {filter ? `No matches for "${filter}"` : canGoUp ? "" : "Empty"}
+            </li>
+          )}
+          {filtered.map((entry) => {
+            const Icon = entry.is_dir ? Folder : FileText;
+            return (
+              <li key={entry.path}>
+                <button
+                  className={`local-item ${entry.is_dir ? "" : "file"}`}
+                  onDoubleClick={() => entry.is_dir && onNavigate(entry.path)}
+                  onContextMenu={(e) => {
+                    if (!onContextMenu) return;
+                    e.preventDefault();
+                    onContextMenu(entry, e.clientX, e.clientY);
+                  }}
+                  title={entry.path}
+                  // Files are not clickable/navigable, but stay enabled so the
+                  // right-click event still fires (disabled buttons don't emit
+                  // contextmenu events on all browsers).
+                >
+                  <Icon size={14} className={`icon ${entry.is_dir ? "dir" : "file"}`} />
+                  <span>{entry.name}</span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+        {loading && (
+          <div className="loading-overlay" aria-live="polite">
+            <div className="loading-badge">
+              <Loader2 size={12} className="spin" />
+              <span>Loading…</span>
+            </div>
+          </div>
+        )}
+      </div>
     </section>
   );
 }

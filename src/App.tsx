@@ -11,6 +11,7 @@ import { FilterBar } from "./components/FilterBar";
 import { FileList } from "./components/FileList";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
 import { TextViewer } from "./components/TextViewer";
+import { Toast } from "./components/Toast";
 
 import { ftpApi } from "./api/ftp";
 import { localApi, type LocalEntry } from "./api/local";
@@ -99,11 +100,10 @@ export default function App() {
 
   // -- transient status message (e.g. "Downloaded foo.csv")
   const [status, setStatus] = useState<string | null>(null);
-  useEffect(() => {
-    if (!status) return;
-    const t = window.setTimeout(() => setStatus(null), 4000);
-    return () => window.clearTimeout(t);
-  }, [status]);
+  // Auto-dismiss is owned by the <Toast/> component so it can play a proper
+  // exit transition before unmounting — driving it from an App-level
+  // setTimeout+setState(null) removed the DOM the instant the timer fired,
+  // which showed up as a "flash then jump" in the UI.
 
   // Suppress the browser's default context menu everywhere. The two file
   // lists (local sidebar bottom, remote right pane) install their own
@@ -613,7 +613,6 @@ export default function App() {
           cwd={localCwd}
           entries={localEntries}
           loading={localLoading}
-          error={localError}
           onNavigate={refreshLocalAt}
           onGoHome={() => localApi.home().then(refreshLocalAt)}
           onRefresh={() => localCwd && refreshLocalAt(localCwd)}
@@ -639,9 +638,6 @@ export default function App() {
           </div>
         </header>
 
-        {error && <div className="banner error">{error}</div>}
-        {status && <div className="banner success">{status}</div>}
-
         {!session ? (
           <div className="welcome">
             <h1>Welcome to SuperFTP</h1>
@@ -654,20 +650,33 @@ export default function App() {
               files in the current directory.
             </p>
           </div>
-        ) : connecting || (loading && entries.length === 0) ? (
+        ) : connecting ? (
           <div className="loading">
             <Loader2 size={20} className="spin" />
-            <span>{connecting ? "Connecting…" : "Loading…"}</span>
+            <span>Connecting…</span>
           </div>
         ) : (
-          <FileList
-            entries={entries}
-            canGoUp={session.cwd !== "/" && session.cwd !== ""}
-            onOpen={openEntry}
-            onGoUp={goUp}
-            filter={effectiveFilter}
-            onContextMenu={(entry, x, y) => setMenu({ entry, x, y })}
-          />
+          // Wrap so a loading mask can overlay the file list during
+          // refreshes / folder navigation, keeping the previous listing
+          // visible underneath so the user retains context.
+          <div className="file-list-container">
+            <FileList
+              entries={entries}
+              canGoUp={session.cwd !== "/" && session.cwd !== ""}
+              onOpen={openEntry}
+              onGoUp={goUp}
+              filter={effectiveFilter}
+              onContextMenu={(entry, x, y) => setMenu({ entry, x, y })}
+            />
+            {loading && (
+              <div className="loading-overlay" aria-live="polite">
+                <div className="loading-badge">
+                  <Loader2 size={14} className="spin" />
+                  <span>Loading…</span>
+                </div>
+              </div>
+            )}
+          </div>
         )}
 
         {/* Filter bar lives at the bottom of the right pane so it feels
@@ -723,6 +732,28 @@ export default function App() {
           onSubmit={handleSubmitProfile}
         />
       )}
+      {/* Toasts overlay the UI without shifting layout. Each Toast owns
+          its own enter/exit animation and auto-dismiss timer. */}
+      <div className="toaster">
+        {error && (
+          <Toast kind="error" message={error} onDismiss={() => setError(null)} />
+        )}
+        {localError && (
+          <Toast
+            kind="error"
+            message={localError}
+            onDismiss={() => setLocalError(null)}
+          />
+        )}
+        {status && (
+          <Toast
+            kind="success"
+            message={status}
+            onDismiss={() => setStatus(null)}
+          />
+        )}
+      </div>
+
       {dialog.kind === "edit" && (
         <ConnectionForm
           title="Edit Connection"

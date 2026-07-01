@@ -594,6 +594,60 @@ kbd {
   color: var(--text-muted);
 }
 
+/* ---------- Loading overlay ----------
+   Sits on top of a file list during refresh / folder navigation so the
+   user gets clear "working…" feedback without losing the previous listing
+   underneath. Kept subtle: a light theme-tinted wash plus a small pill
+   with a spinner. `pointer-events: auto` blocks accidental clicks on the
+   dimmed rows while a fetch is in flight. */
+.file-list-container {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  backdrop-filter: blur(1.5px);
+  -webkit-backdrop-filter: blur(1.5px);
+  pointer-events: auto;
+  animation: overlay-in 120ms ease-out;
+}
+
+@keyframes overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.loading-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  font-size: 12px;
+  color: var(--text);
+}
+
+.loading-badge .spin {
+  color: var(--accent);
+}
+
 .banner {
   padding: 8px 16px;
   font-size: 12px;
@@ -614,6 +668,95 @@ kbd {
 .banner.small {
   padding: 6px 10px;
   font-size: 11px;
+}
+
+/* ---------- Toaster ----------
+   Floating notification stack pinned to the top-right of the viewport,
+   just below the toolbar. `position: fixed` keeps the layout underneath
+   perfectly still, and the container has `pointer-events: none` so its
+   empty area doesn't swallow clicks meant for the file list or sidebar.
+   Each toast opts back in with `pointer-events: auto` so its close button
+   and the box itself still receive input. */
+.toaster {
+  position: fixed;
+  top: 10px;                    /* sits in the toolbar's vertical band */
+  left: 50%;
+  transform: translateX(-50%);  /* horizontally centered against viewport */
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: min(480px, 70vw);
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px 7px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text);
+  /* A whisper-quiet shadow — enough to lift the toast off the file rows,
+     not enough to feel like a heavy card. */
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+  font-size: 12px;
+  line-height: 1.4;
+  /* Hidden by default so the enter transition plays when the parent adds
+     `.visible`. Same transition also drives the exit when it's removed. */
+  opacity: 0;
+  transform: translateY(-6px);
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.toast.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.toast-icon {
+  flex-shrink: 0;
+}
+
+.toast.error .toast-icon {
+  color: var(--danger);
+}
+
+.toast.success .toast-icon {
+  color: var(--success);
+}
+
+.toast-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.toast-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease;
+}
+
+.toast-close:hover {
+  color: var(--text);
+  background: var(--bg-hover);
 }
 
 .spin {
@@ -814,6 +957,16 @@ kbd {
   text-overflow: ellipsis;
   direction: rtl;   /* show the most-specific (tail) part of long paths */
   text-align: left;
+}
+
+.local-list-wrap {
+  /* Owns the flex space so the loading overlay can be `position: absolute`
+     without collapsing the underlying list. */
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .local-list {
