@@ -377,9 +377,10 @@ export default function App() {
     [session],
   );
 
-  // Ctrl+F opens the filter. Esc is a stacked-modal close: viewer first,
-  // then any open right-click menu, then the filter bar. Closing the filter
-  // keeps the current filter text so reopening (Ctrl+F) restores it.
+  // Ctrl+F opens the filter. F5 refreshes the current remote listing.
+  // Esc is a stacked-modal close: viewer first, then any open right-click
+  // menu, then the filter bar. Closing the filter keeps the current filter
+  // text so reopening (Ctrl+F) restores it.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       const isFind = (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f";
@@ -387,6 +388,18 @@ export default function App() {
         if (!session) return;
         e.preventDefault();
         setFilterOpen(true);
+        return;
+      }
+      // F5 / Ctrl+R → refresh the remote listing. Preventing default keeps
+      // the browser from reloading the whole webview, which would drop the
+      // session state.
+      const isRefresh =
+        e.key === "F5" ||
+        ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "r");
+      if (isRefresh) {
+        e.preventDefault();
+        if (!session || loading) return;
+        refreshAt(session.sessionId, session.cwd);
         return;
       }
       if (e.key !== "Escape") return;
@@ -403,7 +416,7 @@ export default function App() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [filterOpen, session, viewer, menu, localMenu]);
+  }, [filterOpen, session, viewer, menu, localMenu, loading, refreshAt]);
 
   // The filter state persists across close/reopen, but must only actually
   // filter the list while the bar is visible. Everything downstream reads
