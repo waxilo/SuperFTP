@@ -8,10 +8,6 @@
 
 ---
 
-<p align="center">
-  <img src="public/主图.png" alt="SuperFTP 主界面截图" width="90%" />
-</p>
-
 ## ✨ 功能特性
 
 - **双协议支持** — 同时支持 FTP 和 SFTP（SSH），通过纯 Rust 实现，无需外部依赖
@@ -27,26 +23,9 @@
 
 ## 📸 界面概览
 
-```
-┌──────────────────────────────────────────────────┐
-│  Sidebar                │  Main Panel            │
-│                         │                        │
-│  ┌─ SuperFTP ──── [+]-┐ │  /home/user/projects  │  🔄
-│  │ Connections         │ │  ──────────────────── │
-│  │                     │ │                        │
-│  │ 🔌 My Server        │ │  📁 src/               │
-│  │    ftp://admin@...  │ │  📁 docs/              │
-│  │                     │ │  📄 README.md          │
-│  │ ⚡ Prod Server (SFTP)│ │  📄 package.json       │
-│  │    sftp://root@...  │ │                        │
-│  ├─────────────────────┤ │                        │
-│  │ Local               │ │                        │
-│  │ 📂 ~/Downloads      │ │                        │
-│  │  📄 report.csv      │ │                        │
-│  │  📁 images/         │ │                        │
-│  └─────────────────────┘ │                        │
-└──────────────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="public/主图.png" alt="SuperFTP 主界面截图" width="90%" />
+</p>
 
 ## 🏗️ 技术架构
 
