@@ -15,6 +15,12 @@ export interface ListResult {
   entries: FileEntry[];
 }
 
+export interface ExistsResult {
+  exists: boolean;
+  /** Only meaningful when `exists` is true. */
+  is_dir: boolean;
+}
+
 export interface ReadTextResult {
   /** Decoded content (UTF-8, lossy). Capped at the requested `maxBytes`. */
   content: string;
@@ -50,6 +56,25 @@ export const ftpApi = {
    *  removed recursively with all their contents. */
   delete: (sessionId: string, remotePath: string, isDir: boolean) =>
     invoke<void>("ftp_delete", { sessionId, remotePath, isDir }),
+  /** Whether a remote path already exists (and if so, whether it's a
+   *  directory). Used to detect name clashes before a paste. */
+  exists: (sessionId: string, remotePath: string) =>
+    invoke<ExistsResult>("ftp_exists", { sessionId, remotePath }),
+  /** Create a remote directory. Fails if the path is already taken. */
+  mkdir: (sessionId: string, remotePath: string) =>
+    invoke<void>("ftp_mkdir", { sessionId, remotePath }),
+  /** Create an empty remote file. Would truncate an existing file, so check
+   *  `exists` first. */
+  createFile: (sessionId: string, remotePath: string) =>
+    invoke<void>("ftp_create_file", { sessionId, remotePath }),
+  /** Move/rename a remote entry. `to` is the full destination path. Purely
+   *  server-side, so no data crosses the wire. Backs "cut → paste". */
+  rename: (sessionId: string, from: string, to: string) =>
+    invoke<void>("ftp_rename", { sessionId, from, to }),
+  /** Copy a remote entry to `to`, recursing into directories. Backs
+   *  "copy → paste". */
+  copy: (sessionId: string, from: string, to: string, isDir: boolean) =>
+    invoke<void>("ftp_copy", { sessionId, from, to, isDir }),
   /** Fetch a remote file's content as text (UTF-8 lossy), capped at
    *  `maxBytes` (defaults to 4 MiB in the backend). */
   readText: (sessionId: string, remotePath: string, maxBytes?: number) =>

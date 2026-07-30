@@ -7,7 +7,7 @@ use tauri::State;
 
 use crate::ftp::{ConnectRequest, ConnectResult, FtpResult, FtpState, ListResult};
 use crate::local::{LocalListResult, LocalResult};
-use crate::transfer::ReadTextResult;
+use crate::transfer::{ExistsResult, ReadTextResult};
 
 #[tauri::command]
 async fn ftp_connect(
@@ -123,6 +123,63 @@ fn local_delete(path: String) -> LocalResult<()> {
     local::delete_path(&path)
 }
 
+/// Does `remote_path` already exist? Used by the paste flow to detect name
+/// clashes before it starts moving bytes around.
+#[tauri::command]
+async fn ftp_exists(
+    state: State<'_, FtpState>,
+    session_id: String,
+    remote_path: String,
+) -> FtpResult<ExistsResult> {
+    transfer::remote_exists(state.inner(), &session_id, &remote_path).await
+}
+
+/// Create a directory on the remote server.
+#[tauri::command]
+async fn ftp_mkdir(
+    state: State<'_, FtpState>,
+    session_id: String,
+    remote_path: String,
+) -> FtpResult<()> {
+    transfer::create_dir_remote(state.inner(), &session_id, &remote_path).await
+}
+
+/// Create an empty file on the remote server.
+#[tauri::command]
+async fn ftp_create_file(
+    state: State<'_, FtpState>,
+    session_id: String,
+    remote_path: String,
+) -> FtpResult<()> {
+    transfer::create_file_remote(state.inner(), &session_id, &remote_path).await
+}
+
+/// Move/rename a remote entry. `to` is the full destination path. Backs the
+/// "cut + paste" action; works for files and directories alike and is
+/// server-side, so no data is transferred.
+#[tauri::command]
+async fn ftp_rename(
+    state: State<'_, FtpState>,
+    session_id: String,
+    from: String,
+    to: String,
+) -> FtpResult<()> {
+    transfer::rename_remote(state.inner(), &session_id, &from, &to).await
+}
+
+/// Copy a remote entry to `to`, recursing into directories. Backs the
+/// "copy + paste" action.
+#[tauri::command]
+async fn ftp_copy(
+    state: State<'_, FtpState>,
+    session_id: String,
+    from: String,
+    to: String,
+    is_dir: bool,
+) -> FtpResult<()> {
+    transfer::copy_remote(state.inner(), &session_id, &from, &to, is_dir).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -137,6 +194,11 @@ pub fn run() {
             ftp_download,
             ftp_upload,
             ftp_delete,
+            ftp_exists,
+            ftp_mkdir,
+            ftp_create_file,
+            ftp_rename,
+            ftp_copy,
             ftp_open_temp,
             ftp_read_text,
             local_home,

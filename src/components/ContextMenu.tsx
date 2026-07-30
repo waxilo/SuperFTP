@@ -4,6 +4,9 @@ export interface ContextMenuItem {
   label: string;
   onSelect: () => void;
   disabled?: boolean;
+  /** Renders a thin divider instead of a button. `label` is used as the React
+   *  key only, and `onSelect` is never called. */
+  separator?: boolean;
 }
 
 interface Props {
@@ -70,7 +73,10 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
       style={{ left: pos.x, top: pos.y }}
       role="menu"
     >
-      {items.map((item, i) => (
+      {items.map((item, i) =>
+        item.separator ? (
+          <div key={i} className="context-menu-sep" role="separator" />
+        ) : (
         <button
           key={i}
           className="context-menu-item"
@@ -83,7 +89,8 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
         >
           {item.label}
         </button>
-      ))}
+        ),
+      )}
     </div>
   );
 }

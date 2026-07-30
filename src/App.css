@@ -334,6 +334,15 @@ kbd {
   overflow: hidden;
 }
 
+/* Holds the create/refresh icon buttons. Flex so they sit in a row with even
+   spacing instead of relying on inline-block whitespace. */
+.toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
 .breadcrumb {
   display: flex;
   align-items: center;
@@ -488,6 +497,25 @@ kbd {
 
 .file-table tbody tr.row:hover {
   background: var(--bg-hover);
+}
+
+/* Selected row — the target for Ctrl+C / Ctrl+X. Kept subtle: a tinted
+   background plus an accent rail on the left edge, so it reads as "current"
+   without competing with the hover state. */
+.file-table tbody tr.row.selected,
+.file-table tbody tr.row.selected:hover {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.file-table tbody tr.row.selected td:first-child {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* An entry waiting to be moved by a paste. Dimmed the way desktop file
+   managers ghost cut items, so it's obvious the clipboard is armed. */
+.file-table tbody tr.row.cut td {
+  opacity: 0.45;
+  font-style: italic;
 }
 
 .file-table td {
@@ -857,6 +885,12 @@ kbd {
   box-shadow: 0 0 0 2px var(--accent-soft);
 }
 
+/* Locked while a submit is in flight (see PromptDialog). */
+.form input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .form-row {
   display: flex;
   gap: 10px;
@@ -909,6 +943,44 @@ kbd {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 6px;
+}
+
+/* ---------- Prompt dialog (single-line input) ---------- */
+
+.modal.prompt-dialog {
+  /* Narrower than the connection form — there's only one field to fill in. */
+  width: min(400px, 92vw);
+}
+
+/* Destination path under the header. Long remote paths truncate rather than
+   widening the dialog; the full value stays available as a tooltip. */
+.prompt-hint {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* The shared `.banner` is a full-bleed strip with a bottom rule, which reads
+   wrong inside a padded form — box it in instead. */
+.prompt-dialog .banner.error {
+  border: 1px solid rgba(229, 83, 75, 0.3);
+  border-radius: var(--radius-sm);
+}
+
+.prompt-dialog input[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.prompt-dialog input[aria-invalid="true"]:focus {
+  box-shadow: 0 0 0 2px rgba(229, 83, 75, 0.25);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 
@@ -1064,6 +1136,13 @@ kbd {
 .context-menu-item:disabled {
   color: var(--text-dim);
   cursor: not-allowed;
+}
+
+/* Divider between groups of menu actions (view / clipboard / destructive). */
+.context-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
 }
 
 

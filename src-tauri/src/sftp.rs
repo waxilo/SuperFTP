@@ -219,6 +219,109 @@ pub fn delete_dir_recursive<'a>(
     })
 }
 
+/// Look up a remote path. Returns `None` when it doesn't exist, or
+/// `Some(is_dir)` when it does. Errors are folded into `None` because the
+/// only caller (conflict detection before a paste) treats "can't stat" the
+/// same as "not there" — the subsequent copy/rename will surface the real
+/// problem with a better message.
+pub async fn stat(holder: &mut SftpHolder, path: &str) -> FtpResult<Option<bool>> {
+    let target = resolve_path(&holder.cwd, path);
+    Ok(holder
+        .sftp
+        .metadata(&target)
+        .await
+        .ok()
+        .map(|meta| meta.is_dir()))
+}
+
+/// Create a directory at `path`. Fails if anything already exists there.
+pub async fn create_dir(holder: &mut SftpHolder, path: &str) -> FtpResult<()> {
+    let target = resolve_path(&holder.cwd, path);
+    holder.sftp.create_dir(target).await.map_err(map_sftp)
+}
+
+/// Create an empty file at `path`. SFTP's create truncates an existing file,
+/// so callers check for a clash first rather than silently wiping something.
+pub async fn create_file(holder: &mut SftpHolder, path: &str) -> FtpResult<()> {
+    let target = resolve_path(&holder.cwd, path);
+    let mut file = holder.sftp.create(target).await.map_err(map_sftp)?;
+    file.flush().await.map_err(map_sftp)?;
+    Ok(())
+}
+
+/// Move (or rename) a remote entry. SFTP's RENAME is atomic and works for
+/// both files and directories, including across directories on the same
+/// filesystem. The destination must not already exist — callers clear it
+/// first when the user opted into overwriting.
+pub async fn rename(holder: &mut SftpHolder, from: &str, to: &str) -> FtpResult<()> {
+    let src = resolve_path(&holder.cwd, from);
+    let dst = resolve_path(&holder.cwd, to);
+    holder.sftp.rename(src, dst).await.map_err(map_sftp)
+}
+
+/// Copy a remote entry to another remote path, recursing into directories.
+/// Unlike the FTP path this never round-trips through the local disk: both
+/// handles live on the same SFTP channel, so bytes are streamed
+/// server-side-to-server-side through us without touching temp files.
+///
+/// Boxed for async recursion.
+pub fn copy_recursive<'a>(
+    holder: &'a mut SftpHolder,
+    from: &'a str,
+    to: &'a str,
+    is_dir: bool,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = FtpResult<()>> + Send + 'a>> {
+    Box::pin(async move {
+        if !is_dir {
+            return copy_file(holder, from, to).await;
+        }
+
+        let src = resolve_path(&holder.cwd, from);
+        let dst = resolve_path(&holder.cwd, to);
+
+        // Create the destination dir unless it's already there (a merge into
+        // an existing folder is the sane behaviour when the user confirmed
+        // the overwrite prompt).
+        if holder.sftp.metadata(&dst).await.is_err() {
+            holder.sftp.create_dir(&dst).await.map_err(map_sftp)?;
+        }
+
+        // Collect first so the borrow on `holder.sftp` is released before we
+        // recurse with `&mut holder`.
+        let children: Vec<(String, bool)> = holder
+            .sftp
+            .read_dir(&src)
+            .await
+            .map_err(map_sftp)?
+            .into_iter()
+            .filter(|e| e.file_name() != "." && e.file_name() != "..")
+            .map(|e| (e.file_name(), e.metadata().is_dir()))
+            .collect();
+
+        for (name, child_is_dir) in children {
+            let child_src = join_path(&src, &name);
+            let child_dst = join_path(&dst, &name);
+            copy_recursive(holder, &child_src, &child_dst, child_is_dir).await?;
+        }
+        Ok(())
+    })
+}
+
+async fn copy_file(holder: &mut SftpHolder, from: &str, to: &str) -> FtpResult<()> {
+    let src = resolve_path(&holder.cwd, from);
+    let dst = resolve_path(&holder.cwd, to);
+    let mut reader = holder.sftp.open(&src).await.map_err(map_sftp)?;
+    let mut writer = holder.sftp.create(&dst).await.map_err(map_sftp)?;
+    tokio::io::copy(&mut reader, &mut writer)
+        .await
+        .map_err(|e| FtpError::Protocol(format!("Copy failed: {e}")))?;
+    writer
+        .flush()
+        .await
+        .map_err(|e| FtpError::Protocol(format!("Copy failed: {e}")))?;
+    Ok(())
+}
+
 /// Stream a local file up to the remote server. The remote file is
 /// created (or overwritten if it already exists).
 pub async fn upload(

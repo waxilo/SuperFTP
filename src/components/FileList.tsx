@@ -18,6 +18,16 @@ interface Props {
   onGoUp: () => void;
   filter: string;
   onContextMenu?: (entry: FileEntry, x: number, y: number) => void;
+  /** Right-click on empty space below the rows — used to offer "Paste" for
+   *  the current directory without having to aim at a file. */
+  onContextMenuBlank?: (x: number, y: number) => void;
+  /** Path of the row rendered as selected. Drives the keyboard shortcuts in
+   *  App, which need to know what Ctrl+C / Ctrl+X should act on. */
+  selectedPath?: string | null;
+  onSelect?: (entry: FileEntry) => void;
+  /** Path currently held in the clipboard in "cut" mode, dimmed to signal
+   *  it's pending a move. */
+  cutPath?: string | null;
 }
 
 type SortKey = "name" | "modified";
@@ -42,7 +52,18 @@ function formatTime(iso: string | null): string {
   return d.toLocaleString();
 }
 
-export function FileList({ entries, canGoUp, onOpen, onGoUp, filter, onContextMenu }: Props) {
+export function FileList({
+  entries,
+  canGoUp,
+  onOpen,
+  onGoUp,
+  filter,
+  onContextMenu,
+  onContextMenuBlank,
+  selectedPath,
+  onSelect,
+  cutPath,
+}: Props) {
   // `null` sort key means "default" — server order, dirs-on-top. Clicking a
   // header cycles asc → desc → back to default. This keeps three visibly
   // distinct states, and asc/desc are guaranteed to differ from default
@@ -110,7 +131,17 @@ export function FileList({ entries, canGoUp, onOpen, onGoUp, filter, onContextMe
   }
 
   return (
-    <div className="file-table-wrap">
+    <div
+      className="file-table-wrap"
+      onContextMenu={(e) => {
+        if (!onContextMenuBlank) return;
+        // Row handlers call preventDefault before this bubbles up, so a
+        // defaulted event means the click landed on empty space.
+        if (e.defaultPrevented) return;
+        e.preventDefault();
+        onContextMenuBlank(e.clientX, e.clientY);
+      }}
+    >
       <table className="file-table">
         <thead>
           <tr>
@@ -158,18 +189,35 @@ export function FileList({ entries, canGoUp, onOpen, onGoUp, filter, onContextMe
             return (
               <tr
                 key={entry.path}
-                className="row"
+                className={[
+                  "row",
+                  entry.path === selectedPath ? "selected" : "",
+                  entry.path === cutPath ? "cut" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                onClick={() => onSelect?.(entry)}
                 onDoubleClick={() => onOpen(entry)}
                 onContextMenu={(e) => {
                   if (!onContextMenu) return;
                   e.preventDefault();
+                  // Right-clicking a row also makes it the selection, so the
+                  // keyboard shortcuts and the menu agree on the target.
+                  onSelect?.(entry);
                   onContextMenu(entry, e.clientX, e.clientY);
                 }}
               >
                 <td className="col-name">
                   <button
                     className="name-cell"
-                    onClick={() => entry.is_dir && onOpen(entry)}
+                    onClick={(e) => {
+                      if (!entry.is_dir) return;
+                      // Navigating away invalidates the selection, so don't
+                      // let this bubble to the row handler and re-arm it
+                      // against the folder we're leaving.
+                      e.stopPropagation();
+                      onOpen(entry);
+                    }}
                     title={entry.path}
                   >
                     <Icon

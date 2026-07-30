@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Loader2, RefreshCcw } from "lucide-react";
+import { FilePlus, FolderPlus, Loader2, RefreshCcw } from "lucide-react";
 import { openPath } from "@tauri-apps/plugin-opener";
 
 import "./App.css";
@@ -10,6 +10,7 @@ import { Breadcrumb } from "./components/Breadcrumb";
 import { FilterBar } from "./components/FilterBar";
 import { FileList } from "./components/FileList";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
+import { PromptDialog } from "./components/PromptDialog";
 import { TextViewer } from "./components/TextViewer";
 import { Toast } from "./components/Toast";
 
@@ -37,6 +38,16 @@ interface Session {
 interface MenuState {
   x: number;
   y: number;
+  /** `null` when the menu was opened on empty space rather than a row, in
+   *  which case only directory-level actions (Paste) are offered. */
+  entry: FileEntry | null;
+}
+
+/** What Copy / Cut put aside for a later Paste. Holds the entry itself (not
+ *  just the path) so we know its name and whether it's a directory without
+ *  another round trip — and so the source row can be dimmed while cut. */
+interface Clipboard {
+  mode: "copy" | "cut";
   entry: FileEntry;
 }
 
@@ -44,6 +55,17 @@ interface LocalMenuState {
   x: number;
   y: number;
   entry: LocalEntry;
+}
+
+/** Drives the "New Folder" / "New File" dialog. `busy` and `error` are held
+ *  here (rather than inside the dialog) because the create round trip lives
+ *  in App — that way a name clash can be shown without closing the dialog. */
+interface CreateDialogState {
+  kind: "dir" | "file";
+  /** Remote directory the new entry goes into. */
+  destDir: string;
+  busy: boolean;
+  error: string | null;
 }
 
 interface ViewerState {
@@ -62,6 +84,52 @@ function parentOf(path: string): string {
   const trimmed = path.replace(/\/+$/, "");
   const idx = trimmed.lastIndexOf("/");
   return idx <= 0 ? "/" : trimmed.slice(0, idx);
+}
+
+/** Join a remote directory and a basename with exactly one separator.
+ *  Remote paths are always POSIX-style, even when the app runs on Windows. */
+function joinRemote(dir: string, name: string): string {
+  if (!dir || dir === "/") return `/${name}`;
+  return dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
+}
+
+/** Split a filename into `[stem, extension]` so a copy suffix lands before
+ *  the extension ("notes copy.txt", not "notes.txt copy"). Dotfiles have no
+ *  extension by this definition, so ".bashrc" stays whole. */
+function splitExtension(name: string): [string, string] {
+  const idx = name.lastIndexOf(".");
+  if (idx <= 0) return [name, ""];
+  return [name.slice(0, idx), name.slice(idx)];
+}
+
+/** Inline validation for a new remote folder/file name. Returns a message to
+ *  show under the input, or `null` when the name is usable.
+ *
+ *  Remote paths are POSIX, so a slash would silently create (or overwrite)
+ *  something in a different directory than the one the dialog claims, and the
+ *  dot names are reserved. The dialog trims before validating, so surrounding
+ *  whitespace needs no rule of its own. */
+function validateRemoteName(name: string): string | null {
+  if (name.includes("/")) return "A name can't contain a slash.";
+  if (name === "." || name === "..") return "That name is reserved.";
+  return null;
+}
+
+/** Find a free name for a copy landing next to its source: "notes copy.txt",
+ *  then "notes copy 2.txt", and so on. Gives up after a sane number of tries
+ *  rather than probing the server forever. */
+async function uniqueRemoteName(
+  sessionId: string,
+  destDir: string,
+  name: string,
+): Promise<string> {
+  const [stem, ext] = splitExtension(name);
+  for (let i = 1; i <= 50; i += 1) {
+    const candidate = i === 1 ? `${stem} copy${ext}` : `${stem} copy ${i}${ext}`;
+    const probe = await ftpApi.exists(sessionId, joinRemote(destDir, candidate));
+    if (!probe.exists) return candidate;
+  }
+  throw new Error(`Couldn't find an unused name for a copy of "${name}".`);
 }
 
 export default function App() {
@@ -88,11 +156,26 @@ export default function App() {
   // -- right-click menu on a remote file row
   const [menu, setMenu] = useState<MenuState | null>(null);
 
+  // -- remote row selection, so Ctrl+C / Ctrl+X have a target
+  const [selected, setSelected] = useState<FileEntry | null>(null);
+
+  // -- copy/cut clipboard for remote entries
+  const [clipboard, setClipboard] = useState<Clipboard | null>(null);
+  // Guards against a second paste starting while the first is still running;
+  // a recursive copy over FTP can take a while and overlapping the two would
+  // interleave commands on the single control connection.
+  const [pasting, setPasting] = useState(false);
+
   // -- right-click menu on a local file row
   const [localMenu, setLocalMenu] = useState<LocalMenuState | null>(null);
 
   // -- in-app text preview of a remote file
   const [viewer, setViewer] = useState<ViewerState | null>(null);
+
+  // -- "New Folder" / "New File" dialog
+  const [createDialog, setCreateDialog] = useState<CreateDialogState | null>(
+    null,
+  );
 
   // -- filter (Ctrl+F)
   const [filterOpen, setFilterOpen] = useState(false);
@@ -232,6 +315,8 @@ export default function App() {
       setEntries([]);
       setFilter("");
       setFilterOpen(false);
+      setSelected(null);
+      setClipboard(null);
     }
   }, [session]);
 
@@ -243,6 +328,10 @@ export default function App() {
       // doesn't linger over an unrelated listing. Filter text is kept so
       // Ctrl+F still restores the last query if the user wants it back.
       setFilterOpen(false);
+      // The selection is path-based and meaningless in another directory.
+      // The clipboard deliberately survives navigation — that's the whole
+      // point of cut/copy here.
+      setSelected(null);
       refreshAt(session.sessionId, path);
     },
     [refreshAt, session],
@@ -377,47 +466,6 @@ export default function App() {
     [session],
   );
 
-  // Ctrl+F opens the filter. F5 refreshes the current remote listing.
-  // Esc is a stacked-modal close: viewer first, then any open right-click
-  // menu, then the filter bar. Closing the filter keeps the current filter
-  // text so reopening (Ctrl+F) restores it.
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      const isFind = (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f";
-      if (isFind) {
-        if (!session) return;
-        e.preventDefault();
-        setFilterOpen(true);
-        return;
-      }
-      // F5 / Ctrl+R → refresh the remote listing. Preventing default keeps
-      // the browser from reloading the whole webview, which would drop the
-      // session state.
-      const isRefresh =
-        e.key === "F5" ||
-        ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "r");
-      if (isRefresh) {
-        e.preventDefault();
-        if (!session || loading) return;
-        refreshAt(session.sessionId, session.cwd);
-        return;
-      }
-      if (e.key !== "Escape") return;
-
-      if (viewer) {
-        setViewer(null);
-      } else if (menu) {
-        setMenu(null);
-      } else if (localMenu) {
-        setLocalMenu(null);
-      } else if (filterOpen) {
-        setFilterOpen(false);
-      }
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [filterOpen, session, viewer, menu, localMenu, loading, refreshAt]);
-
   // The filter state persists across close/reopen, but must only actually
   // filter the list while the bar is visible. Everything downstream reads
   // this instead of `filter` directly.
@@ -487,6 +535,10 @@ export default function App() {
       try {
         await ftpApi.delete(session.sessionId, entry.path, entry.is_dir);
         setStatus(`Deleted ${entry.name}`);
+        // Drop any reference to the entry that just went away, so the
+        // clipboard shortcuts can't act on a path the server no longer has.
+        setSelected((prev) => (prev?.path === entry.path ? null : prev));
+        setClipboard((prev) => (prev?.entry.path === entry.path ? null : prev));
         refreshAt(session.sessionId, session.cwd);
       } catch (e) {
         setError(String(e));
@@ -494,6 +546,234 @@ export default function App() {
     },
     [session, refreshAt],
   );
+
+  // ----- Create a remote folder / file -----------------------------------
+  // Opening the dialog is all this does; the work happens in submitCreate so
+  // a name clash can be reported inside the dialog instead of closing it and
+  // making the user start over.
+  const handleCreateRemote = useCallback(
+    (kind: "dir" | "file", destDir: string) => {
+      if (!session) return;
+      setCreateDialog({ kind, destDir, busy: false, error: null });
+    },
+    [session],
+  );
+
+  const submitCreate = useCallback(
+    async (name: string) => {
+      if (!session || !createDialog || createDialog.busy) return;
+      const { kind, destDir } = createDialog;
+      const target = joinRemote(destDir, name);
+
+      setCreateDialog((d) => (d ? { ...d, busy: true, error: null } : d));
+      try {
+        // Creating a file would truncate an existing one, so refuse up front
+        // rather than destroying data on a typo.
+        const clash = await ftpApi.exists(session.sessionId, target);
+        if (clash.exists) {
+          setCreateDialog((d) =>
+            d ? { ...d, busy: false, error: `"${name}" already exists here.` } : d,
+          );
+          return;
+        }
+        if (kind === "dir") {
+          await ftpApi.mkdir(session.sessionId, target);
+        } else {
+          await ftpApi.createFile(session.sessionId, target);
+        }
+        setCreateDialog(null);
+        setStatus(`Created ${target}`);
+        refreshAt(session.sessionId, session.cwd);
+      } catch (e) {
+        // Keep the dialog open with the text intact so the user can adjust
+        // the name and retry without retyping it.
+        setCreateDialog((d) => (d ? { ...d, busy: false, error: String(e) } : d));
+      }
+    },
+    [session, createDialog, refreshAt],
+  );
+
+  // ----- Copy / Cut / Paste on the remote side ---------------------------
+  // Copy and Cut only stash the entry; nothing touches the server until a
+  // Paste names a destination. Cut is implemented as a server-side rename at
+  // paste time rather than "copy then delete", so a move never transfers
+  // bytes and can't leave a half-written duplicate behind if it fails.
+  const handleCopyRemote = useCallback((entry: FileEntry) => {
+    setClipboard({ mode: "copy", entry });
+    setStatus(`Copied "${entry.name}" — paste it into any folder`);
+  }, []);
+
+  const handleCutRemote = useCallback((entry: FileEntry) => {
+    setClipboard({ mode: "cut", entry });
+    setStatus(`Cut "${entry.name}" — paste it into any folder to move it`);
+  }, []);
+
+  const handlePasteRemote = useCallback(
+    async (destDir: string) => {
+      if (!session || !clipboard || pasting) return;
+      const { entry: src, mode } = clipboard;
+
+      // A directory can't contain itself. Without this a recursive copy
+      // would spiral until the server ran out of something.
+      if (
+        src.is_dir &&
+        (destDir === src.path || destDir.startsWith(`${src.path}/`))
+      ) {
+        setError(`Can't paste "${src.name}" into itself.`);
+        return;
+      }
+      // Moving something to where it already is has no meaning; treat it as a
+      // no-op rather than prompting about a name clash with itself.
+      if (mode === "cut" && parentOf(src.path) === destDir) {
+        setStatus(`"${src.name}" is already in this folder`);
+        setClipboard(null);
+        return;
+      }
+
+      setPasting(true);
+      setError(null);
+      try {
+        let name = src.name;
+        let target = joinRemote(destDir, name);
+
+        const clash = await ftpApi.exists(session.sessionId, target);
+        if (clash.exists) {
+          if (mode === "copy") {
+            // Pasting a copy next to the original is the common case, so
+            // auto-renaming beats interrupting with a dialog.
+            name = await uniqueRemoteName(session.sessionId, destDir, name);
+            target = joinRemote(destDir, name);
+          } else {
+            // A move over an existing entry is destructive, so ask. Both FTP
+            // and SFTP refuse to rename onto an existing path, hence the
+            // explicit delete first.
+            const ok = window.confirm(
+              `"${name}" already exists in ${destDir}.\nReplace it?`,
+            );
+            if (!ok) return;
+            await ftpApi.delete(session.sessionId, target, clash.is_dir);
+          }
+        }
+
+        if (mode === "copy") {
+          setStatus(
+            src.is_dir
+              ? `Copying folder "${src.name}"…`
+              : `Copying "${src.name}"…`,
+          );
+          await ftpApi.copy(session.sessionId, src.path, target, src.is_dir);
+          setStatus(`Copied to ${target}`);
+        } else {
+          setStatus(`Moving "${src.name}"…`);
+          await ftpApi.rename(session.sessionId, src.path, target);
+          setStatus(`Moved to ${target}`);
+          // A cut is spent once pasted; a copy stays on the clipboard so it
+          // can be pasted into several folders in a row.
+          setClipboard(null);
+        }
+        refreshAt(session.sessionId, session.cwd);
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setPasting(false);
+      }
+    },
+    [session, clipboard, pasting, refreshAt],
+  );
+
+  // Keyboard shortcuts. Defined after the remote clipboard handlers because
+  // the dependency array references them.
+  //
+  // Ctrl+C / Ctrl+X / Ctrl+V drive the remote clipboard. Ctrl+F opens the
+  // filter, F5 refreshes the current listing. Esc is a stacked-modal close:
+  // viewer first, then any open right-click menu, then the filter bar.
+  // Closing the filter keeps the current filter text so reopening (Ctrl+F)
+  // restores it.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      // The create dialog is modal: it handles its own Enter/Escape, and no
+      // app-level shortcut should fire behind it.
+      if (createDialog) return;
+
+      // Never hijack keys while the user is typing in a field or reading the
+      // text viewer — Ctrl+C there means "copy this text", not "copy a file".
+      const el = e.target as HTMLElement | null;
+      const typing =
+        !!el &&
+        (el.tagName === "INPUT" ||
+          el.tagName === "TEXTAREA" ||
+          el.isContentEditable);
+
+      // Copy/Cut act on the selected row; Paste targets the directory
+      // currently on screen.
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && !e.shiftKey && !typing && !viewer && session) {
+        const key = e.key.toLowerCase();
+        // Leave Ctrl+C alone when there's a text selection to copy.
+        const hasTextSelection = !!window.getSelection()?.toString();
+        if (key === "c" && selected && !hasTextSelection) {
+          e.preventDefault();
+          handleCopyRemote(selected);
+          return;
+        }
+        if (key === "x" && selected) {
+          e.preventDefault();
+          handleCutRemote(selected);
+          return;
+        }
+        if (key === "v" && clipboard) {
+          e.preventDefault();
+          handlePasteRemote(session.cwd);
+          return;
+        }
+      }
+
+      const isFind = mod && e.key.toLowerCase() === "f";
+      if (isFind) {
+        if (!session) return;
+        e.preventDefault();
+        setFilterOpen(true);
+        return;
+      }
+      // F5 / Ctrl+R → refresh the remote listing. Preventing default keeps
+      // the browser from reloading the whole webview, which would drop the
+      // session state.
+      const isRefresh = e.key === "F5" || (mod && e.key.toLowerCase() === "r");
+      if (isRefresh) {
+        e.preventDefault();
+        if (!session || loading) return;
+        refreshAt(session.sessionId, session.cwd);
+        return;
+      }
+      if (e.key !== "Escape") return;
+
+      if (viewer) {
+        setViewer(null);
+      } else if (menu) {
+        setMenu(null);
+      } else if (localMenu) {
+        setLocalMenu(null);
+      } else if (filterOpen) {
+        setFilterOpen(false);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [
+    filterOpen,
+    session,
+    viewer,
+    menu,
+    localMenu,
+    createDialog,
+    loading,
+    refreshAt,
+    selected,
+    clipboard,
+    handleCopyRemote,
+    handleCutRemote,
+    handlePasteRemote,
+  ]);
 
   // ----- Delete a local entry --------------------------------------------
   const handleDeleteLocal = useCallback(
@@ -544,37 +824,88 @@ export default function App() {
   // Build the context menu items lazily so the destination is always up-to-
   // date when the user clicks (they may have navigated locally first).
   const menuItems = useMemo<ContextMenuItem[]>(() => {
-    if (!menu) return [];
+    if (!menu || !session) return [];
     const target = localCwd || "(no folder)";
-    const isDir = menu.entry.is_dir;
+    const entry = menu.entry;
+
+    // Right-clicking a folder targets *inside* it, matching how desktop file
+    // managers behave; anywhere else targets the directory on screen. Applies
+    // to both pasting and creating.
+    const pasteDir = entry?.is_dir ? entry.path : session.cwd;
+    const createItems: ContextMenuItem[] = [
+      {
+        label: entry?.is_dir ? `New Folder in "${entry.name}"…` : "New Folder…",
+        onSelect: () => handleCreateRemote("dir", pasteDir),
+      },
+      {
+        label: entry?.is_dir ? `New File in "${entry.name}"…` : "New File…",
+        onSelect: () => handleCreateRemote("file", pasteDir),
+      },
+    ];
+    const pasteItem: ContextMenuItem = {
+      label: pasting
+        ? "Pasting…"
+        : !clipboard
+          ? "Paste"
+          : entry?.is_dir
+            ? `Paste "${clipboard.entry.name}" into "${entry.name}"`
+            : `Paste "${clipboard.entry.name}"`,
+      onSelect: () => handlePasteRemote(pasteDir),
+      disabled: !clipboard || pasting,
+    };
+
+    // Empty-space click: only the directory-level actions make sense.
+    if (!entry) {
+      return [
+        ...createItems,
+        { label: "sep-blank", separator: true, onSelect: () => {} },
+        pasteItem,
+      ];
+    }
+
+    const isDir = entry.is_dir;
     return [
       {
         label: "Open",
-        onSelect: () => handleOpenDefault(menu.entry),
+        onSelect: () => handleOpenDefault(entry),
         disabled: isDir,
       },
       {
         label: "Open as Text",
-        onSelect: () => handleOpenAsText(menu.entry),
+        onSelect: () => handleOpenAsText(entry),
         disabled: isDir,
       },
       {
         label: isDir ? "Send (folders not supported)" : `Send → ${target}`,
-        onSelect: () => handleSend(menu.entry),
+        onSelect: () => handleSend(entry),
         disabled: isDir || !localCwd,
       },
+      { label: "sep-create", separator: true, onSelect: () => {} },
+      ...createItems,
+      { label: "sep-clipboard", separator: true, onSelect: () => {} },
+      { label: "Copy", onSelect: () => handleCopyRemote(entry) },
+      { label: "Cut", onSelect: () => handleCutRemote(entry) },
+      pasteItem,
+      { label: "sep-delete", separator: true, onSelect: () => {} },
       {
         label: isDir ? "Delete folder…" : "Delete",
-        onSelect: () => handleDeleteRemote(menu.entry),
+        onSelect: () => handleDeleteRemote(entry),
       },
     ];
   }, [
     menu,
+    session,
     localCwd,
+    clipboard,
+    pasting,
     handleSend,
     handleOpenDefault,
     handleOpenAsText,
     handleDeleteRemote,
+    handleCreateRemote,
+    handleCopyRemote,
+    handleCutRemote,
+    handlePasteRemote,
   ]);
 
   const localMenuItems = useMemo<ContextMenuItem[]>(() => {
@@ -647,6 +978,22 @@ export default function App() {
           <div className="toolbar-right">
             <button
               className="icon-btn"
+              onClick={() => session && handleCreateRemote("dir", session.cwd)}
+              disabled={!session || loading}
+              title="New folder here"
+            >
+              <FolderPlus size={16} />
+            </button>
+            <button
+              className="icon-btn"
+              onClick={() => session && handleCreateRemote("file", session.cwd)}
+              disabled={!session || loading}
+              title="New empty file here"
+            >
+              <FilePlus size={16} />
+            </button>
+            <button
+              className="icon-btn"
               onClick={refresh}
               disabled={!session || loading}
               title="Refresh"
@@ -685,6 +1032,12 @@ export default function App() {
               onGoUp={goUp}
               filter={effectiveFilter}
               onContextMenu={(entry, x, y) => setMenu({ entry, x, y })}
+              onContextMenuBlank={(x, y) => setMenu({ entry: null, x, y })}
+              selectedPath={selected?.path ?? null}
+              onSelect={setSelected}
+              cutPath={
+                clipboard?.mode === "cut" ? clipboard.entry.path : null
+              }
             />
             {loading && (
               <div className="loading-overlay" aria-live="polite">
@@ -728,6 +1081,23 @@ export default function App() {
           y={localMenu.y}
           items={localMenuItems}
           onClose={() => setLocalMenu(null)}
+        />
+      )}
+
+      {createDialog && (
+        <PromptDialog
+          title={createDialog.kind === "dir" ? "New Folder" : "New File"}
+          label="Name"
+          hint={`in ${createDialog.destDir}`}
+          placeholder={
+            createDialog.kind === "dir" ? "my-folder" : "notes.txt"
+          }
+          confirmLabel="Create"
+          validate={validateRemoteName}
+          error={createDialog.error}
+          busy={createDialog.busy}
+          onCancel={() => setCreateDialog(null)}
+          onSubmit={submitCreate}
         />
       )}
 
