@@ -43,12 +43,13 @@ interface MenuState {
   entry: FileEntry | null;
 }
 
-/** What Copy / Cut put aside for a later Paste. Holds the entry itself (not
- *  just the path) so we know its name and whether it's a directory without
- *  another round trip — and so the source row can be dimmed while cut. */
+/** What Copy / Cut put aside for a later Paste. Holds the entries themselves
+ *  (not just their paths) so we know their names and whether they're
+ *  directories without another round trip — and so the source rows can be
+ *  dimmed while cut. Always non-empty. */
 interface Clipboard {
   mode: "copy" | "cut";
-  entry: FileEntry;
+  entries: FileEntry[];
 }
 
 interface LocalMenuState {
@@ -100,6 +101,14 @@ function splitExtension(name: string): [string, string] {
   const idx = name.lastIndexOf(".");
   if (idx <= 0) return [name, ""];
   return [name.slice(0, idx), name.slice(idx)];
+}
+
+/** Human label for a batch: the quoted name when there's exactly one entry,
+ *  a count otherwise. Keeps menu labels and status text readable whether the
+ *  action targets one file or twenty. */
+function describeBatch(entries: FileEntry[]): string {
+  if (entries.length === 1) return `"${entries[0].name}"`;
+  return `${entries.length} items`;
 }
 
 /** Inline validation for a new remote folder/file name. Returns a message to
@@ -156,8 +165,22 @@ export default function App() {
   // -- right-click menu on a remote file row
   const [menu, setMenu] = useState<MenuState | null>(null);
 
-  // -- remote row selection, so Ctrl+C / Ctrl+X have a target
-  const [selected, setSelected] = useState<FileEntry | null>(null);
+  // -- remote row selection, so Ctrl+C / Ctrl+X / Delete have a target.
+  // Paths rather than entries: a path is stable across a refresh, while an
+  // entry object is replaced on every listing. Always confined to the
+  // directory on screen, so `selectedEntries` can resolve it against
+  // `entries`.
+  const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
+
+  const selectedSet = useMemo(() => new Set(selectedPaths), [selectedPaths]);
+
+  // The selected entries in listing order, so batch operations run in a
+  // predictable sequence regardless of the order rows were clicked in.
+  // Paths that vanished from the listing simply drop out.
+  const selectedEntries = useMemo(
+    () => entries.filter((e) => selectedSet.has(e.path)),
+    [entries, selectedSet],
+  );
 
   // -- copy/cut clipboard for remote entries
   const [clipboard, setClipboard] = useState<Clipboard | null>(null);
@@ -165,6 +188,15 @@ export default function App() {
   // a recursive copy over FTP can take a while and overlapping the two would
   // interleave commands on the single control connection.
   const [pasting, setPasting] = useState(false);
+
+  // Rows to ghost because they're waiting to be moved by a paste.
+  const cutPaths = useMemo(
+    () =>
+      new Set(
+        clipboard?.mode === "cut" ? clipboard.entries.map((e) => e.path) : [],
+      ),
+    [clipboard],
+  );
 
   // -- right-click menu on a local file row
   const [localMenu, setLocalMenu] = useState<LocalMenuState | null>(null);
@@ -254,6 +286,14 @@ export default function App() {
       try {
         const result = await ftpApi.list(sessionId, path);
         setEntries(result.entries);
+        // Drop selected paths the listing no longer has, so a batch action
+        // can never target something that was moved or deleted out from
+        // under it (by a paste, a delete, or another client).
+        const alive = new Set(result.entries.map((e) => e.path));
+        setSelectedPaths((prev) => {
+          const next = prev.filter((p) => alive.has(p));
+          return next.length === prev.length ? prev : next;
+        });
         setSession((prev) =>
           prev ? { ...prev, cwd: result.cwd || path } : prev,
         );
@@ -315,7 +355,7 @@ export default function App() {
       setEntries([]);
       setFilter("");
       setFilterOpen(false);
-      setSelected(null);
+      setSelectedPaths([]);
       setClipboard(null);
     }
   }, [session]);
@@ -331,7 +371,7 @@ export default function App() {
       // The selection is path-based and meaningless in another directory.
       // The clipboard deliberately survives navigation — that's the whole
       // point of cut/copy here.
-      setSelected(null);
+      setSelectedPaths([]);
       refreshAt(session.sessionId, path);
     },
     [refreshAt, session],
@@ -381,30 +421,58 @@ export default function App() {
   );
 
   // ----- Send (download) -------------------------------------------------
+  // Takes a batch so a multi-selection downloads in one go. Transfers run
+  // one at a time: the session has a single control connection, so
+  // overlapping them would interleave commands on it.
   const handleSend = useCallback(
-    async (entry: FileEntry) => {
-      if (!session) return;
+    async (targets: FileEntry[]) => {
+      if (!session || targets.length === 0) return;
       if (!localCwd) {
         setError("Pick a local folder first.");
         return;
       }
-      if (entry.is_dir) {
+      const files = targets.filter((e) => !e.is_dir);
+      const skippedDirs = targets.length - files.length;
+      if (files.length === 0) {
         setError("Sending whole folders isn't supported yet.");
         return;
       }
       setError(null);
-      try {
-        const written = await ftpApi.download(
-          session.sessionId,
-          entry.path,
-          localCwd,
+      const failures: string[] = [];
+      let written = "";
+      for (const [i, entry] of files.entries()) {
+        setStatus(
+          files.length > 1
+            ? `Downloading ${i + 1}/${files.length}: ${entry.name}…`
+            : `Downloading ${entry.name}…`,
         );
-        setStatus(`Downloaded to ${written}`);
-        // Refresh the local panel so the new file shows up immediately.
-        refreshLocalAt(localCwd);
-      } catch (e) {
-        setError(String(e));
+        try {
+          written = await ftpApi.download(
+            session.sessionId,
+            entry.path,
+            localCwd,
+          );
+        } catch (e) {
+          failures.push(`${entry.name}: ${String(e)}`);
+        }
       }
+      const ok = files.length - failures.length;
+      if (failures.length) {
+        setError(
+          `Failed to download ${failures.length} of ${files.length}:\n${failures.join("\n")}`,
+        );
+      }
+      if (ok > 0) {
+        setStatus(
+          ok === 1 && !skippedDirs
+            ? `Downloaded to ${written}`
+            : `Downloaded ${ok} file${ok === 1 ? "" : "s"} to ${localCwd}${
+                skippedDirs ? ` (skipped ${skippedDirs} folder(s))` : ""
+              }`,
+        );
+      }
+      // Refresh the local panel so the new files show up immediately.
+      refreshLocalAt(localCwd);
     },
     [session, localCwd, refreshLocalAt],
   );
@@ -471,10 +539,29 @@ export default function App() {
   // this instead of `filter` directly.
   const effectiveFilter = filterOpen ? filter : "";
 
-  const matchedCount = useMemo(() => {
-    if (!effectiveFilter.trim()) return entries.length;
-    return entries.filter((e) => matchesFilter(e.name, effectiveFilter)).length;
-  }, [entries, effectiveFilter]);
+  // Rows the user can actually see. Ctrl+A selects exactly these, so a
+  // filtered "select all" doesn't quietly rope in hidden entries.
+  const visibleEntries = useMemo(
+    () =>
+      effectiveFilter.trim()
+        ? entries.filter((e) => matchesFilter(e.name, effectiveFilter))
+        : entries,
+    [entries, effectiveFilter],
+  );
+
+  const matchedCount = visibleEntries.length;
+
+  // Rows the filter hides must not stay selected — a batch delete acting on a
+  // row that isn't on screen would be a nasty surprise. Also catches entries
+  // that disappeared from the listing between refreshes.
+  useEffect(() => {
+    setSelectedPaths((prev) => {
+      if (prev.length === 0) return prev;
+      const visible = new Set(visibleEntries.map((e) => e.path));
+      const next = prev.filter((p) => visible.has(p));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [visibleEntries]);
 
   // ----- Local: open with system default app -----------------------------
   const handleOpenLocal = useCallback(async (entry: LocalEntry) => {
@@ -518,31 +605,72 @@ export default function App() {
     }
   }, []);
 
-  // ----- Delete a remote entry -------------------------------------------
+  // ----- Delete remote entries -------------------------------------------
   // Confirmation via `window.confirm` is deliberately minimal; delete is
-  // destructive but the user just picked the entry via right-click, so a
+  // destructive but the user just picked the entries themselves, so a
   // heavier custom modal would feel out of place. Folders trigger a more
   // explicit "and all its contents" prompt since the backend recurses.
+  //
+  // A batch keeps going after a failure — stopping halfway would leave the
+  // user guessing which of the twenty files actually went away — and reports
+  // everything that didn't work at the end.
   const handleDeleteRemote = useCallback(
-    async (entry: FileEntry) => {
-      if (!session) return;
-      const prompt = entry.is_dir
-        ? `Delete remote folder "${entry.name}" and all its contents?\nThis cannot be undone.`
-        : `Delete remote file "${entry.name}"?`;
-      const ok = window.confirm(prompt);
-      if (!ok) return;
-      setError(null);
-      try {
-        await ftpApi.delete(session.sessionId, entry.path, entry.is_dir);
-        setStatus(`Deleted ${entry.name}`);
-        // Drop any reference to the entry that just went away, so the
-        // clipboard shortcuts can't act on a path the server no longer has.
-        setSelected((prev) => (prev?.path === entry.path ? null : prev));
-        setClipboard((prev) => (prev?.entry.path === entry.path ? null : prev));
-        refreshAt(session.sessionId, session.cwd);
-      } catch (e) {
-        setError(String(e));
+    async (targets: FileEntry[]) => {
+      if (!session || targets.length === 0) return;
+      const dirs = targets.filter((e) => e.is_dir).length;
+      let prompt: string;
+      if (targets.length === 1) {
+        const only = targets[0];
+        prompt = only.is_dir
+          ? `Delete remote folder "${only.name}" and all its contents?\nThis cannot be undone.`
+          : `Delete remote file "${only.name}"?`;
+      } else {
+        prompt =
+          `Delete ${targets.length} selected remote items?` +
+          (dirs
+            ? `\nThis includes ${dirs} folder${dirs === 1 ? "" : "s"} and all their contents.`
+            : "") +
+          `\nThis cannot be undone.`;
       }
+      if (!window.confirm(prompt)) return;
+
+      setError(null);
+      const failures: string[] = [];
+      const deleted: string[] = [];
+      for (const [i, entry] of targets.entries()) {
+        if (targets.length > 1) {
+          setStatus(`Deleting ${i + 1}/${targets.length}: ${entry.name}…`);
+        }
+        try {
+          await ftpApi.delete(session.sessionId, entry.path, entry.is_dir);
+          deleted.push(entry.path);
+        } catch (e) {
+          failures.push(`${entry.name}: ${String(e)}`);
+        }
+      }
+
+      // Drop any reference to entries that just went away, so the clipboard
+      // shortcuts can't act on a path the server no longer has.
+      if (deleted.length) {
+        const gone = new Set(deleted);
+        setSelectedPaths((prev) => prev.filter((p) => !gone.has(p)));
+        setClipboard((prev) => {
+          if (!prev) return prev;
+          const kept = prev.entries.filter((e) => !gone.has(e.path));
+          return kept.length ? { ...prev, entries: kept } : null;
+        });
+        setStatus(
+          deleted.length === 1 && targets.length === 1
+            ? `Deleted ${targets[0].name}`
+            : `Deleted ${deleted.length} item${deleted.length === 1 ? "" : "s"}`,
+        );
+      }
+      if (failures.length) {
+        setError(
+          `Failed to delete ${failures.length} of ${targets.length}:\n${failures.join("\n")}`,
+        );
+      }
+      refreshAt(session.sessionId, session.cwd);
     },
     [session, refreshAt],
   );
@@ -594,86 +722,139 @@ export default function App() {
   );
 
   // ----- Copy / Cut / Paste on the remote side ---------------------------
-  // Copy and Cut only stash the entry; nothing touches the server until a
+  // Copy and Cut only stash the entries; nothing touches the server until a
   // Paste names a destination. Cut is implemented as a server-side rename at
   // paste time rather than "copy then delete", so a move never transfers
   // bytes and can't leave a half-written duplicate behind if it fails.
-  const handleCopyRemote = useCallback((entry: FileEntry) => {
-    setClipboard({ mode: "copy", entry });
-    setStatus(`Copied "${entry.name}" — paste it into any folder`);
+  // Batches run strictly one entry at a time: the session has a single
+  // control connection, so overlapping transfers would interleave on it.
+  const handleCopyRemote = useCallback((targets: FileEntry[]) => {
+    if (targets.length === 0) return;
+    setClipboard({ mode: "copy", entries: targets });
+    setStatus(`Copied ${describeBatch(targets)} — paste into any folder`);
   }, []);
 
-  const handleCutRemote = useCallback((entry: FileEntry) => {
-    setClipboard({ mode: "cut", entry });
-    setStatus(`Cut "${entry.name}" — paste it into any folder to move it`);
+  const handleCutRemote = useCallback((targets: FileEntry[]) => {
+    if (targets.length === 0) return;
+    setClipboard({ mode: "cut", entries: targets });
+    setStatus(`Cut ${describeBatch(targets)} — paste into any folder to move`);
   }, []);
 
   const handlePasteRemote = useCallback(
     async (destDir: string) => {
       if (!session || !clipboard || pasting) return;
-      const { entry: src, mode } = clipboard;
+      const { entries: sources, mode } = clipboard;
+      if (sources.length === 0) return;
 
-      // A directory can't contain itself. Without this a recursive copy
-      // would spiral until the server ran out of something.
-      if (
-        src.is_dir &&
-        (destDir === src.path || destDir.startsWith(`${src.path}/`))
-      ) {
-        setError(`Can't paste "${src.name}" into itself.`);
-        return;
-      }
-      // Moving something to where it already is has no meaning; treat it as a
-      // no-op rather than prompting about a name clash with itself.
-      if (mode === "cut" && parentOf(src.path) === destDir) {
-        setStatus(`"${src.name}" is already in this folder`);
-        setClipboard(null);
+      // Weed out entries that can't land here before touching the server, so
+      // one impossible item doesn't abort the rest of the batch.
+      const skipped: string[] = [];
+      const sinks = sources.filter((src) => {
+        // A directory can't contain itself. Without this a recursive copy
+        // would spiral until the server ran out of something.
+        if (
+          src.is_dir &&
+          (destDir === src.path || destDir.startsWith(`${src.path}/`))
+        ) {
+          skipped.push(`"${src.name}" can't be pasted into itself`);
+          return false;
+        }
+        // Moving something to where it already is has no meaning; treat it as
+        // a no-op rather than prompting about a name clash with itself.
+        if (mode === "cut" && parentOf(src.path) === destDir) {
+          skipped.push(`"${src.name}" is already in this folder`);
+          return false;
+        }
+        return true;
+      });
+
+      if (sinks.length === 0) {
+        // Nothing to do — report why and spend the cut so the ghosted rows
+        // don't linger.
+        setStatus(skipped.join("; "));
+        if (mode === "cut") setClipboard(null);
         return;
       }
 
       setPasting(true);
       setError(null);
-      try {
-        let name = src.name;
-        let target = joinRemote(destDir, name);
+      const failures: string[] = [];
+      // Sources a cut couldn't move; they stay on the clipboard so the user
+      // can retry them without re-selecting.
+      const unmoved: FileEntry[] = [];
+      let lastTarget = "";
+      let done = 0;
 
-        const clash = await ftpApi.exists(session.sessionId, target);
-        if (clash.exists) {
-          if (mode === "copy") {
-            // Pasting a copy next to the original is the common case, so
-            // auto-renaming beats interrupting with a dialog.
-            name = await uniqueRemoteName(session.sessionId, destDir, name);
-            target = joinRemote(destDir, name);
-          } else {
-            // A move over an existing entry is destructive, so ask. Both FTP
-            // and SFTP refuse to rename onto an existing path, hence the
-            // explicit delete first.
-            const ok = window.confirm(
-              `"${name}" already exists in ${destDir}.\nReplace it?`,
-            );
-            if (!ok) return;
-            await ftpApi.delete(session.sessionId, target, clash.is_dir);
+      try {
+        for (const [i, src] of sinks.entries()) {
+          const verb = mode === "copy" ? "Copying" : "Moving";
+          setStatus(
+            sinks.length > 1
+              ? `${verb} ${i + 1}/${sinks.length}: ${src.name}…`
+              : src.is_dir
+                ? `${verb} folder "${src.name}"…`
+                : `${verb} "${src.name}"…`,
+          );
+          try {
+            let name = src.name;
+            let target = joinRemote(destDir, name);
+
+            const clash = await ftpApi.exists(session.sessionId, target);
+            if (clash.exists) {
+              if (mode === "copy") {
+                // Pasting a copy next to the original is the common case, so
+                // auto-renaming beats interrupting with a dialog.
+                name = await uniqueRemoteName(session.sessionId, destDir, name);
+                target = joinRemote(destDir, name);
+              } else {
+                // A move over an existing entry is destructive, so ask. Both
+                // FTP and SFTP refuse to rename onto an existing path, hence
+                // the explicit delete first.
+                const ok = window.confirm(
+                  `"${name}" already exists in ${destDir}.\nReplace it?`,
+                );
+                if (!ok) {
+                  skipped.push(`"${name}" kept as-is`);
+                  unmoved.push(src);
+                  continue;
+                }
+                await ftpApi.delete(session.sessionId, target, clash.is_dir);
+              }
+            }
+
+            if (mode === "copy") {
+              await ftpApi.copy(session.sessionId, src.path, target, src.is_dir);
+            } else {
+              await ftpApi.rename(session.sessionId, src.path, target);
+            }
+            lastTarget = target;
+            done += 1;
+          } catch (e) {
+            failures.push(`${src.name}: ${String(e)}`);
+            unmoved.push(src);
           }
         }
 
-        if (mode === "copy") {
-          setStatus(
-            src.is_dir
-              ? `Copying folder "${src.name}"…`
-              : `Copying "${src.name}"…`,
+        if (done > 0) {
+          const what = done === 1 ? lastTarget : `${done} items into ${destDir}`;
+          setStatus(mode === "copy" ? `Copied to ${what}` : `Moved to ${what}`);
+        } else if (skipped.length) {
+          setStatus(skipped.join("; "));
+        }
+        if (failures.length) {
+          setError(
+            `Failed to paste ${failures.length} of ${sinks.length}:\n${failures.join("\n")}`,
           );
-          await ftpApi.copy(session.sessionId, src.path, target, src.is_dir);
-          setStatus(`Copied to ${target}`);
-        } else {
-          setStatus(`Moving "${src.name}"…`);
-          await ftpApi.rename(session.sessionId, src.path, target);
-          setStatus(`Moved to ${target}`);
-          // A cut is spent once pasted; a copy stays on the clipboard so it
-          // can be pasted into several folders in a row.
-          setClipboard(null);
+        }
+        // A cut is spent once pasted, except for entries that didn't make it
+        // — those stay armed. A copy always stays on the clipboard so it can
+        // be pasted into several folders in a row.
+        if (mode === "cut") {
+          setClipboard(
+            unmoved.length ? { mode: "cut", entries: unmoved } : null,
+          );
         }
         refreshAt(session.sessionId, session.cwd);
-      } catch (e) {
-        setError(String(e));
       } finally {
         setPasting(false);
       }
@@ -704,21 +885,28 @@ export default function App() {
           el.tagName === "TEXTAREA" ||
           el.isContentEditable);
 
-      // Copy/Cut act on the selected row; Paste targets the directory
-      // currently on screen.
+      // Copy/Cut act on the selected rows; Paste targets the directory
+      // currently on screen; Ctrl+A selects every visible row.
       const mod = e.ctrlKey || e.metaKey;
       if (mod && !e.shiftKey && !typing && !viewer && session) {
         const key = e.key.toLowerCase();
         // Leave Ctrl+C alone when there's a text selection to copy.
         const hasTextSelection = !!window.getSelection()?.toString();
-        if (key === "c" && selected && !hasTextSelection) {
+        if (key === "a") {
+          // Always preventDefault: the webview's own "select all text" is
+          // never what someone wants in a file listing.
           e.preventDefault();
-          handleCopyRemote(selected);
+          setSelectedPaths(visibleEntries.map((en) => en.path));
           return;
         }
-        if (key === "x" && selected) {
+        if (key === "c" && selectedEntries.length && !hasTextSelection) {
           e.preventDefault();
-          handleCutRemote(selected);
+          handleCopyRemote(selectedEntries);
+          return;
+        }
+        if (key === "x" && selectedEntries.length) {
+          e.preventDefault();
+          handleCutRemote(selectedEntries);
           return;
         }
         if (key === "v" && clipboard) {
@@ -726,6 +914,21 @@ export default function App() {
           handlePasteRemote(session.cwd);
           return;
         }
+      }
+
+      // Delete removes the whole selection, matching the context menu.
+      if (
+        e.key === "Delete" &&
+        !typing &&
+        !viewer &&
+        !mod &&
+        session &&
+        !pasting &&
+        selectedEntries.length
+      ) {
+        e.preventDefault();
+        handleDeleteRemote(selectedEntries);
+        return;
       }
 
       const isFind = mod && e.key.toLowerCase() === "f";
@@ -755,6 +958,10 @@ export default function App() {
         setLocalMenu(null);
       } else if (filterOpen) {
         setFilterOpen(false);
+      } else if (selectedPaths.length) {
+        // Last rung of the ladder: nothing left to close, so drop the
+        // selection.
+        setSelectedPaths([]);
       }
     }
     window.addEventListener("keydown", onKey);
@@ -767,12 +974,16 @@ export default function App() {
     localMenu,
     createDialog,
     loading,
+    pasting,
     refreshAt,
-    selected,
+    selectedPaths,
+    selectedEntries,
+    visibleEntries,
     clipboard,
     handleCopyRemote,
     handleCutRemote,
     handlePasteRemote,
+    handleDeleteRemote,
   ]);
 
   // ----- Delete a local entry --------------------------------------------
@@ -828,6 +1039,20 @@ export default function App() {
     const target = localCwd || "(no folder)";
     const entry = menu.entry;
 
+    // What the batch actions act on. Right-clicking a row inside the current
+    // multi-selection keeps the whole batch; right-clicking outside it makes
+    // the clicked row the selection (done in the FileList handler below), so
+    // `selectedEntries` is the batch either way. The `[entry]` fallback covers
+    // the render before that retarget lands.
+    const targets =
+      entry && selectedSet.has(entry.path) && selectedEntries.length
+        ? selectedEntries
+        : entry
+          ? [entry]
+          : [];
+    const batch = targets.length > 1;
+    const batchLabel = describeBatch(targets);
+
     // Right-clicking a folder targets *inside* it, matching how desktop file
     // managers behave; anywhere else targets the directory on screen. Applies
     // to both pasting and creating.
@@ -848,8 +1073,8 @@ export default function App() {
         : !clipboard
           ? "Paste"
           : entry?.is_dir
-            ? `Paste "${clipboard.entry.name}" into "${entry.name}"`
-            : `Paste "${clipboard.entry.name}"`,
+            ? `Paste ${describeBatch(clipboard.entries)} into "${entry.name}"`
+            : `Paste ${describeBatch(clipboard.entries)}`,
       onSelect: () => handlePasteRemote(pasteDir),
       disabled: !clipboard || pasting,
     };
@@ -864,6 +1089,10 @@ export default function App() {
     }
 
     const isDir = entry.is_dir;
+    // Open / Open as Text stay single-target: they act on the row that was
+    // actually right-clicked, since opening a dozen files at once is rarely
+    // what's wanted. Everything below the first separator runs on the batch.
+    const sendableCount = targets.filter((t) => !t.is_dir).length;
     return [
       {
         label: "Open",
@@ -876,20 +1105,35 @@ export default function App() {
         disabled: isDir,
       },
       {
-        label: isDir ? "Send (folders not supported)" : `Send → ${target}`,
-        onSelect: () => handleSend(entry),
-        disabled: isDir || !localCwd,
+        label:
+          sendableCount === 0
+            ? "Send (folders not supported)"
+            : batch
+              ? `Send ${sendableCount} file${sendableCount === 1 ? "" : "s"} → ${target}`
+              : `Send → ${target}`,
+        onSelect: () => handleSend(targets),
+        disabled: sendableCount === 0 || !localCwd,
       },
       { label: "sep-create", separator: true, onSelect: () => {} },
       ...createItems,
       { label: "sep-clipboard", separator: true, onSelect: () => {} },
-      { label: "Copy", onSelect: () => handleCopyRemote(entry) },
-      { label: "Cut", onSelect: () => handleCutRemote(entry) },
+      {
+        label: batch ? `Copy ${batchLabel}` : "Copy",
+        onSelect: () => handleCopyRemote(targets),
+      },
+      {
+        label: batch ? `Cut ${batchLabel}` : "Cut",
+        onSelect: () => handleCutRemote(targets),
+      },
       pasteItem,
       { label: "sep-delete", separator: true, onSelect: () => {} },
       {
-        label: isDir ? "Delete folder…" : "Delete",
-        onSelect: () => handleDeleteRemote(entry),
+        label: batch
+          ? `Delete ${batchLabel}…`
+          : isDir
+            ? "Delete folder…"
+            : "Delete",
+        onSelect: () => handleDeleteRemote(targets),
       },
     ];
   }, [
@@ -898,6 +1142,8 @@ export default function App() {
     localCwd,
     clipboard,
     pasting,
+    selectedSet,
+    selectedEntries,
     handleSend,
     handleOpenDefault,
     handleOpenAsText,
@@ -974,6 +1220,13 @@ export default function App() {
         <header className="toolbar">
           <div className="toolbar-left">
             <Breadcrumb path={session?.cwd ?? "/"} onNavigate={navigateTo} />
+            {/* Ctrl+A can select rows that are scrolled out of view, so the
+                count is the only reliable feedback on how big the batch is. */}
+            {selectedPaths.length > 1 && (
+              <span className="selection-count" role="status" aria-live="polite">
+                {selectedPaths.length} selected
+              </span>
+            )}
           </div>
           <div className="toolbar-right">
             <button
@@ -1012,7 +1265,10 @@ export default function App() {
             </p>
             <p className="hint">
               Tip: once connected, press <kbd>Ctrl</kbd> + <kbd>F</kbd> to filter
-              files in the current directory.
+              files in the current directory. <kbd>Ctrl</kbd> or{" "}
+              <kbd>Shift</kbd> + click picks several at a time,{" "}
+              <kbd>Ctrl</kbd> + <kbd>A</kbd> takes the lot — then copy, cut or
+              delete them in one go.
             </p>
           </div>
         ) : connecting ? (
@@ -1031,13 +1287,18 @@ export default function App() {
               onOpen={openEntry}
               onGoUp={goUp}
               filter={effectiveFilter}
-              onContextMenu={(entry, x, y) => setMenu({ entry, x, y })}
+              onContextMenu={(entry, x, y) => {
+                // Right-clicking outside the current selection retargets it
+                // to the clicked row; right-clicking a row that's already
+                // part of the batch leaves the batch intact, so the menu can
+                // act on all of it.
+                if (!selectedSet.has(entry.path)) setSelectedPaths([entry.path]);
+                setMenu({ entry, x, y });
+              }}
               onContextMenuBlank={(x, y) => setMenu({ entry: null, x, y })}
-              selectedPath={selected?.path ?? null}
-              onSelect={setSelected}
-              cutPath={
-                clipboard?.mode === "cut" ? clipboard.entry.path : null
-              }
+              selectedPaths={selectedSet}
+              onSelectionChange={setSelectedPaths}
+              cutPaths={cutPaths}
             />
             {loading && (
               <div className="loading-overlay" aria-live="polite">

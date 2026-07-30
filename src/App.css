@@ -329,9 +329,33 @@ kbd {
 }
 
 .toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   flex: 1;
   min-width: 0;
   overflow: hidden;
+}
+
+/* Breadcrumb yields space to the selection badge rather than pushing it out
+   of the (overflow: hidden) toolbar on a deep path. */
+.toolbar-left .breadcrumb {
+  min-width: 0;
+}
+
+/* How many rows are selected. Only shown for real multi-selections, so it
+   doubles as the signal that batch actions are armed. */
+.selection-count {
+  flex-shrink: 0;
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 999px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 /* Holds the create/refresh icon buttons. Flex so they sit in a row with even
@@ -493,15 +517,20 @@ kbd {
 .file-table tbody tr.row {
   cursor: default;
   border-bottom: 1px solid transparent;
+  /* Ctrl/Shift+clicking rows would otherwise drag out a text selection,
+     which both looks wrong and would swallow Ctrl+C (the handler defers to
+     an active text selection). */
+  user-select: none;
 }
 
 .file-table tbody tr.row:hover {
   background: var(--bg-hover);
 }
 
-/* Selected row — the target for Ctrl+C / Ctrl+X. Kept subtle: a tinted
-   background plus an accent rail on the left edge, so it reads as "current"
-   without competing with the hover state. */
+/* Selected rows — the targets for Ctrl+C / Ctrl+X / Delete. Kept subtle: a
+   tinted background plus an accent rail on the left edge, so it reads as
+   "current" without competing with the hover state. Applies to every row of a
+   multi-selection, so a Ctrl+A'd listing reads as one continuous block. */
 .file-table tbody tr.row.selected,
 .file-table tbody tr.row.selected:hover {
   background: color-mix(in srgb, var(--accent) 16%, transparent);

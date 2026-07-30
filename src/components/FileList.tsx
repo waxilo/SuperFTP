@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
 import {
   ChevronDown,
   ChevronUp,
@@ -21,14 +21,19 @@ interface Props {
   /** Right-click on empty space below the rows — used to offer "Paste" for
    *  the current directory without having to aim at a file. */
   onContextMenuBlank?: (x: number, y: number) => void;
-  /** Path of the row rendered as selected. Drives the keyboard shortcuts in
-   *  App, which need to know what Ctrl+C / Ctrl+X should act on. */
-  selectedPath?: string | null;
-  onSelect?: (entry: FileEntry) => void;
-  /** Path currently held in the clipboard in "cut" mode, dimmed to signal
-   *  it's pending a move. */
-  cutPath?: string | null;
+  /** Paths of the rows rendered as selected. Drives the keyboard shortcuts
+   *  in App, which need to know what Ctrl+C / Ctrl+X should act on. */
+  selectedPaths?: ReadonlySet<string>;
+  /** Called with the complete next selection whenever a click changes it.
+   *  The list owns the click semantics (plain / Ctrl / Shift) because only
+   *  it knows the visible row order a Shift range depends on. */
+  onSelectionChange?: (paths: string[]) => void;
+  /** Paths currently held in the clipboard in "cut" mode, dimmed to signal
+   *  they're pending a move. */
+  cutPaths?: ReadonlySet<string>;
 }
+
+const NO_PATHS: ReadonlySet<string> = new Set<string>();
 
 type SortKey = "name" | "modified";
 type SortDir = "asc" | "desc";
@@ -60,9 +65,9 @@ export function FileList({
   filter,
   onContextMenu,
   onContextMenuBlank,
-  selectedPath,
-  onSelect,
-  cutPath,
+  selectedPaths = NO_PATHS,
+  onSelectionChange,
+  cutPaths = NO_PATHS,
 }: Props) {
   // `null` sort key means "default" — server order, dirs-on-top. Clicking a
   // header cycles asc → desc → back to default. This keeps three visibly
@@ -70,6 +75,11 @@ export function FileList({
   // because the backend no longer pre-sorts by name.
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>("asc");
+
+  // Row a Shift+click measures its range from. Held here rather than in App
+  // because it's a pure view concern, and it must survive selection changes
+  // (Shift+clicking twice in a row should re-measure from the same anchor).
+  const [anchor, setAnchor] = useState<string | null>(null);
 
   function toggleSort(key: SortKey) {
     if (sortKey !== key) {
@@ -121,6 +131,46 @@ export function FileList({
     return arr;
   }, [filtered, sortKey, sortDir]);
 
+  /** Selection semantics, matching desktop file managers:
+   *  - plain click     → select just this row, and make it the anchor
+   *  - Ctrl/Cmd click  → toggle this row, and make it the anchor
+   *  - Shift click     → select the anchor..row range, replacing the selection
+   *  - Ctrl+Shift click→ add the anchor..row range to the selection
+   *  The anchor is deliberately left alone by Shift so the range can be
+   *  widened or narrowed by repeated Shift+clicks. */
+  function handleRowClick(entry: FileEntry, e: ReactMouseEvent) {
+    if (!onSelectionChange) return;
+    const additive = e.ctrlKey || e.metaKey;
+
+    if (e.shiftKey) {
+      const from = sorted.findIndex((x) => x.path === (anchor ?? entry.path));
+      const to = sorted.findIndex((x) => x.path === entry.path);
+      // A stale anchor (filtered out, or from a previous directory) degrades
+      // to a plain click rather than selecting a nonsense range.
+      if (from === -1 || to === -1) {
+        setAnchor(entry.path);
+        onSelectionChange([entry.path]);
+        return;
+      }
+      const [lo, hi] = from <= to ? [from, to] : [to, from];
+      const range = sorted.slice(lo, hi + 1).map((x) => x.path);
+      onSelectionChange(
+        additive ? [...new Set([...selectedPaths, ...range])] : range,
+      );
+      return;
+    }
+
+    setAnchor(entry.path);
+    if (additive) {
+      const next = new Set(selectedPaths);
+      if (next.has(entry.path)) next.delete(entry.path);
+      else next.add(entry.path);
+      onSelectionChange([...next]);
+      return;
+    }
+    onSelectionChange([entry.path]);
+  }
+
   function sortIndicator(key: SortKey) {
     if (sortKey !== key) return <ChevronsUpDown size={12} className="sort-icon dim" />;
     return sortDir === "asc" ? (
@@ -133,6 +183,13 @@ export function FileList({
   return (
     <div
       className="file-table-wrap"
+      onClick={(e) => {
+        // Clicking genuinely empty space clears the selection. Anything
+        // inside a row (or a header cell, e.g. the sort buttons) is left to
+        // its own handler.
+        if ((e.target as HTMLElement).closest("tr")) return;
+        onSelectionChange?.([]);
+      }}
       onContextMenu={(e) => {
         if (!onContextMenuBlank) return;
         // Row handlers call preventDefault before this bubbles up, so a
@@ -191,19 +248,20 @@ export function FileList({
                 key={entry.path}
                 className={[
                   "row",
-                  entry.path === selectedPath ? "selected" : "",
-                  entry.path === cutPath ? "cut" : "",
+                  selectedPaths.has(entry.path) ? "selected" : "",
+                  cutPaths.has(entry.path) ? "cut" : "",
                 ]
                   .filter(Boolean)
                   .join(" ")}
-                onClick={() => onSelect?.(entry)}
+                onClick={(e) => handleRowClick(entry, e)}
                 onDoubleClick={() => onOpen(entry)}
                 onContextMenu={(e) => {
                   if (!onContextMenu) return;
                   e.preventDefault();
-                  // Right-clicking a row also makes it the selection, so the
-                  // keyboard shortcuts and the menu agree on the target.
-                  onSelect?.(entry);
+                  // App retargets the selection when the click lands outside
+                  // it, and keeps it when the row is part of a multi-select.
+                  // Either way this row becomes the Shift anchor.
+                  setAnchor(entry.path);
                   onContextMenu(entry, e.clientX, e.clientY);
                 }}
               >
@@ -211,6 +269,9 @@ export function FileList({
                   <button
                     className="name-cell"
                     onClick={(e) => {
+                      // With a modifier held the click means "select", not
+                      // "open" — let it bubble to the row handler.
+                      if (e.ctrlKey || e.metaKey || e.shiftKey) return;
                       if (!entry.is_dir) return;
                       // Navigating away invalidates the selection, so don't
                       // let this bubble to the row handler and re-arm it
