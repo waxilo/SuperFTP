@@ -26,6 +26,10 @@ export const localApi = {
    *  (defaults to 4 MiB in the backend). */
   readText: (path: string, maxBytes?: number) =>
     invoke<LocalReadTextResult>("local_read_text", { path, maxBytes }),
+  /** Overwrite a local file with `content` (UTF-8). Returns the number of
+   *  bytes written. Only safe for files that were read in full. */
+  writeText: (path: string, content: string) =>
+    invoke<number>("local_write_text", { path, content }),
   /** Delete a local path. Files are removed directly; directories are
    *  removed recursively with all their contents. */
   delete: (path: string) => invoke<void>("local_delete", { path }),

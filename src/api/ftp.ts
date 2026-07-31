@@ -83,4 +83,10 @@ export const ftpApi = {
       remotePath,
       maxBytes,
     }),
+  /** Overwrite a remote file with `content` (UTF-8). Backs the text editor's
+   *  Save action. Only safe for files that were read in full — writing back a
+   *  truncated preview would drop everything past the size cap. Returns the
+   *  number of bytes written. */
+  writeText: (sessionId: string, remotePath: string, content: string) =>
+    invoke<number>("ftp_write_text", { sessionId, remotePath, content }),
 };

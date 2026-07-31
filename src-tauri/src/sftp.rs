@@ -344,6 +344,26 @@ pub async fn upload(
     Ok(())
 }
 
+/// Overwrite a remote file with `bytes`, creating it if needed and truncating
+/// whatever was there before. Used by the in-app text editor's Save action.
+pub async fn write_bytes(
+    holder: &mut SftpHolder,
+    remote_path: &str,
+    bytes: &[u8],
+) -> FtpResult<()> {
+    let target = resolve_path(&holder.cwd, remote_path);
+    let mut remote = holder.sftp.create(&target).await.map_err(map_sftp)?;
+    remote
+        .write_all(bytes)
+        .await
+        .map_err(|e| FtpError::Protocol(format!("Transfer failed: {e}")))?;
+    remote
+        .flush()
+        .await
+        .map_err(|e| FtpError::Protocol(format!("Transfer failed: {e}")))?;
+    Ok(())
+}
+
 /// Change the working directory. Returns the resolved absolute path.
 pub async fn change_dir(holder: &mut SftpHolder, path: &str) -> FtpResult<String> {
     let target = resolve_path(&holder.cwd, path);

@@ -135,6 +135,23 @@ pub fn read_text(path: &str, max_bytes: usize) -> LocalResult<ReadTextResult> {
     })
 }
 
+/// Overwrite a local file with `content` (UTF-8). Mirrors
+/// `transfer::write_text` so the in-app editor can save either side through
+/// the same flow. Refuses directories outright; the caller is expected to
+/// have read the file in full, since writing back a truncated preview would
+/// throw away everything past the size cap.
+///
+/// Returns the number of bytes written.
+pub fn write_text(path: &str, content: &str) -> LocalResult<u64> {
+    let p = PathBuf::from(path);
+    if p.is_dir() {
+        return Err(LocalError::Io(format!("not a file: {path}")));
+    }
+    let bytes = content.as_bytes();
+    std::fs::write(&p, bytes)?;
+    Ok(bytes.len() as u64)
+}
+
 /// Delete a local path. Files use `remove_file`; directories are removed
 /// recursively (with all contents) via `remove_dir_all`. The caller is
 /// responsible for confirming the destructive action with the user before

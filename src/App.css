@@ -1238,7 +1238,7 @@ kbd {
 }
 
 
-/* ---------- Text viewer (right-click → Open as Text) ---------- */
+/* ---------- Text viewer / editor (double-click a remote file) ---------- */
 
 .modal.text-viewer {
   /* Wider + taller than the connection form modal, since this one is meant
@@ -1279,20 +1279,40 @@ kbd {
   border-top: 1px solid var(--border);
 }
 
-.text-viewer-pre {
+/* Editable buffer. Styled to read like the old <pre> so switching the viewer
+   to an editor didn't change how files look. */
+.text-viewer-area {
+  display: block;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
   margin: 0;
   padding: 12px 14px;
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 12px;
   line-height: 1.55;
   color: var(--text);
+  /* `wrap="off"` on the element drives the actual wrapping; these keep the
+     whitespace rendering identical to the previous read-only <pre>. */
   white-space: pre;
-  /* Preserve runs of spaces and tabs but never inject word-breaks; the
-     `.wrap` modifier opts into wrapping when the user toggles it. */
+  overflow: auto;
   tab-size: 4;
 }
 
-.text-viewer-pre.wrap {
+.text-viewer-area.wrap {
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.text-viewer-area:read-only {
+  color: var(--text-dim);
+}
+
+/* Unsaved-changes marker next to the filename in the modal header. */
+.text-viewer-dirty {
+  color: var(--accent);
 }

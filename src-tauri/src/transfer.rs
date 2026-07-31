@@ -507,6 +507,41 @@ pub async fn upload(
     Ok(remote_path)
 }
 
+/// Overwrite `remote_path` with `content`, encoded as UTF-8. Backs the in-app
+/// text editor's Save action, so it deliberately writes the whole file in one
+/// shot instead of patching it — FTP has no partial-write primitive anyway.
+///
+/// The caller must only offer this for files it read in full: saving a
+/// truncated preview would silently drop everything past the size cap.
+/// Returns the number of bytes written so the viewer can refresh its size.
+pub async fn write_text(
+    state: &FtpState,
+    session_id: &str,
+    remote_path: &str,
+    content: &str,
+) -> FtpResult<u64> {
+    let bytes = content.as_bytes();
+
+    let mut sessions = state.sessions.lock().await;
+    let session = sessions
+        .get_mut(session_id)
+        .ok_or_else(|| FtpError::SessionNotFound(session_id.to_string()))?;
+
+    match session {
+        Session::Ftp(stream) => {
+            let mut data = stream.put_with_stream(remote_path).await?;
+            data.write_all(bytes).await.map_err(io_err)?;
+            data.flush().await.map_err(io_err)?;
+            // Same reasoning as every other STOR here: finalize so the server
+            // sends its completion reply and the session stays usable.
+            stream.finalize_put_stream(data).await?;
+        }
+        Session::Sftp(holder) => crate::sftp::write_bytes(holder, remote_path, bytes).await?,
+    }
+
+    Ok(bytes.len() as u64)
+}
+
 async fn upload_ftp(
     stream: &mut suppaftp::tokio::AsyncFtpStream,
     local_path: &Path,

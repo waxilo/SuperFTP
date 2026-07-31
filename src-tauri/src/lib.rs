@@ -75,6 +75,18 @@ async fn ftp_read_text(
     transfer::read_text(state.inner(), &session_id, &remote_path, cap).await
 }
 
+/// Overwrite a remote file with the given text. Backs the text viewer's Save
+/// button. Returns the number of bytes written.
+#[tauri::command]
+async fn ftp_write_text(
+    state: State<'_, FtpState>,
+    session_id: String,
+    remote_path: String,
+    content: String,
+) -> FtpResult<u64> {
+    transfer::write_text(state.inner(), &session_id, &remote_path, &content).await
+}
+
 #[tauri::command]
 fn local_home() -> String {
     local::home_dir()
@@ -90,6 +102,12 @@ fn local_list(path: String) -> LocalResult<LocalListResult> {
 fn local_read_text(path: String, max_bytes: Option<usize>) -> LocalResult<ReadTextResult> {
     let cap = max_bytes.unwrap_or(4 * 1024 * 1024);
     local::read_text(&path, cap)
+}
+
+/// Overwrite a local file with the given text. Returns the bytes written.
+#[tauri::command]
+fn local_write_text(path: String, content: String) -> LocalResult<u64> {
+    local::write_text(&path, &content)
 }
 
 /// Upload a local file into `remote_dir` on the active session. Returns
@@ -201,9 +219,11 @@ pub fn run() {
             ftp_copy,
             ftp_open_temp,
             ftp_read_text,
+            ftp_write_text,
             local_home,
             local_list,
             local_read_text,
+            local_write_text,
             local_delete,
         ])
         .run(tauri::generate_context!())

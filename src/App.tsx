@@ -70,8 +70,14 @@ interface CreateDialogState {
 }
 
 interface ViewerState {
-  /** Remote filename used as the modal title. */
+  /** Filename used as the modal title. */
   name: string;
+  /** Where the text came from, and where a save writes it back to. Remote
+   *  paths are resolved against the session that opened them, so the id is
+   *  captured here rather than read from `session` at save time. */
+  source:
+    | { kind: "remote"; sessionId: string; path: string }
+    | { kind: "local"; path: string };
   /** Decoded text, or `null` while the fetch is in flight. */
   content: string | null;
   /** Set when the fetch failed; rendered as a banner in the modal. */
@@ -382,15 +388,6 @@ export default function App() {
     navigateTo(parentOf(session.cwd));
   }, [navigateTo, session]);
 
-  const openEntry = useCallback(
-    (entry: FileEntry) => {
-      if (entry.is_dir) {
-        navigateTo(entry.path);
-      }
-    },
-    [navigateTo],
-  );
-
   const refresh = useCallback(() => {
     if (!session) return;
     refreshAt(session.sessionId, session.cwd);
@@ -477,19 +474,23 @@ export default function App() {
     [session, localCwd, refreshLocalAt],
   );
 
-  // ----- Open with system default app ------------------------------------
+  // ----- Open Locally (system default app) -------------------------------
   // Downloads the file into a private temp folder, then asks the OS to open
   // it with whatever application is registered for that file type. Folders
   // are excluded — the menu item disables itself for them anyway.
+  //
+  // Note the copy is a one-way snapshot: edits made in the external app land
+  // in the temp file, not back on the server. Use the built-in editor
+  // (double-click) for changes that need to be saved remotely.
   const handleOpenDefault = useCallback(
     async (entry: FileEntry) => {
       if (!session || entry.is_dir) return;
       setError(null);
-      setStatus(`Opening ${entry.name}…`);
+      setStatus(`Opening ${entry.name} locally…`);
       try {
         const localPath = await ftpApi.openTemp(session.sessionId, entry.path);
         await openPath(localPath);
-        setStatus(`Opened ${entry.name}`);
+        setStatus(`Opened a local copy of ${entry.name}`);
       } catch (e) {
         setError(String(e));
       }
@@ -497,16 +498,22 @@ export default function App() {
     [session],
   );
 
-  // ----- Open as text in the in-app viewer -------------------------------
+  // ----- Open as text in the in-app editor -------------------------------
   // Shows the modal immediately with a loading state so the user gets
   // feedback even on a slow link, then fills in the content (or error) when
   // the download resolves.
   const handleOpenAsText = useCallback(
     async (entry: FileEntry) => {
       if (!session || entry.is_dir) return;
+      const source = {
+        kind: "remote",
+        sessionId: session.sessionId,
+        path: entry.path,
+      } as const;
       setError(null);
       setViewer({
         name: entry.name,
+        source,
         content: null,
         error: null,
         truncated: false,
@@ -516,6 +523,7 @@ export default function App() {
         const result = await ftpApi.readText(session.sessionId, entry.path);
         setViewer({
           name: entry.name,
+          source,
           content: result.content,
           error: null,
           truncated: result.truncated,
@@ -524,6 +532,7 @@ export default function App() {
       } catch (e) {
         setViewer({
           name: entry.name,
+          source,
           content: "",
           error: String(e),
           truncated: false,
@@ -532,6 +541,22 @@ export default function App() {
       }
     },
     [session],
+  );
+
+  // Double-click (and the name cell's click for folders). Folders navigate;
+  // files open in the built-in text editor, which is the fast path for the
+  // configs, scripts and logs this app mostly deals with. Opening a file in
+  // an external application stays available via the context menu's
+  // "Open Locally".
+  const openEntry = useCallback(
+    (entry: FileEntry) => {
+      if (entry.is_dir) {
+        navigateTo(entry.path);
+        return;
+      }
+      handleOpenAsText(entry);
+    },
+    [navigateTo, handleOpenAsText],
   );
 
   // The filter state persists across close/reopen, but must only actually
@@ -574,12 +599,14 @@ export default function App() {
     }
   }, []);
 
-  // ----- Local: open as text in the in-app viewer -------------------------
+  // ----- Local: open as text in the in-app editor -------------------------
   const handleOpenLocalAsText = useCallback(async (entry: LocalEntry) => {
     if (entry.is_dir) return;
+    const source = { kind: "local", path: entry.path } as const;
     setError(null);
     setViewer({
       name: entry.name,
+      source,
       content: null,
       error: null,
       truncated: false,
@@ -589,6 +616,7 @@ export default function App() {
       const result = await localApi.readText(entry.path);
       setViewer({
         name: entry.name,
+        source,
         content: result.content,
         error: null,
         truncated: result.truncated,
@@ -597,6 +625,7 @@ export default function App() {
     } catch (e) {
       setViewer({
         name: entry.name,
+        source,
         content: "",
         error: String(e),
         truncated: false,
@@ -604,6 +633,40 @@ export default function App() {
       });
     }
   }, []);
+
+  // ----- Save the edited text back to where it came from ------------------
+  // Rethrows on failure so the editor can keep the draft on screen and show
+  // the reason; on success the viewer's content is re-baselined with exactly
+  // what was written, which clears the editor's dirty marker.
+  //
+  // Truncated reads are never editable (the editor disables saving), so a
+  // whole-file overwrite can't silently discard the tail here.
+  const handleSaveViewer = useCallback(
+    async (text: string) => {
+      if (!viewer) return;
+      const { source } = viewer;
+      setError(null);
+      const written =
+        source.kind === "remote"
+          ? await ftpApi.writeText(source.sessionId, source.path, text)
+          : await localApi.writeText(source.path, text);
+      setViewer((v) =>
+        v && v.source === source
+          ? { ...v, content: text, error: null, size: written, truncated: false }
+          : v,
+      );
+      setStatus(`Saved ${viewer.name}`);
+      // Size and mtime just changed, so refresh whichever panel shows it.
+      if (source.kind === "remote") {
+        if (session && parentOf(source.path) === session.cwd) {
+          refreshAt(session.sessionId, session.cwd);
+        }
+      } else if (localCwd) {
+        refreshLocalAt(localCwd);
+      }
+    },
+    [viewer, session, localCwd, refreshAt, refreshLocalAt],
+  );
 
   // ----- Delete remote entries -------------------------------------------
   // Confirmation via `window.confirm` is deliberately minimal; delete is
@@ -866,15 +929,18 @@ export default function App() {
   // the dependency array references them.
   //
   // Ctrl+C / Ctrl+X / Ctrl+V drive the remote clipboard. Ctrl+F opens the
-  // filter, F5 refreshes the current listing. Esc is a stacked-modal close:
-  // viewer first, then any open right-click menu, then the filter bar.
-  // Closing the filter keeps the current filter text so reopening (Ctrl+F)
-  // restores it.
+  // filter, F5 refreshes the current listing. Esc is a stacked close: any
+  // open right-click menu first, then the filter bar, then the selection.
+  // (The text editor and the create dialog handle Esc themselves, and this
+  // handler bows out entirely while either is open.) Closing the filter keeps
+  // the current filter text so reopening (Ctrl+F) restores it.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      // The create dialog is modal: it handles its own Enter/Escape, and no
-      // app-level shortcut should fire behind it.
-      if (createDialog) return;
+      // The create dialog and the text editor are modal: they own their
+      // Enter/Escape/Ctrl+S, and no app-level shortcut should fire behind
+      // them. The editor in particular is a real text field, so Ctrl+F there
+      // must not pop the file filter open.
+      if (createDialog || viewer) return;
 
       // Never hijack keys while the user is typing in a field or reading the
       // text viewer — Ctrl+C there means "copy this text", not "copy a file".
@@ -950,9 +1016,7 @@ export default function App() {
       }
       if (e.key !== "Escape") return;
 
-      if (viewer) {
-        setViewer(null);
-      } else if (menu) {
+      if (menu) {
         setMenu(null);
       } else if (localMenu) {
         setLocalMenu(null);
@@ -1089,19 +1153,16 @@ export default function App() {
     }
 
     const isDir = entry.is_dir;
-    // Open / Open as Text stay single-target: they act on the row that was
-    // actually right-clicked, since opening a dozen files at once is rarely
+    // "Open Locally" stays single-target: it acts on the row that was actually
+    // right-clicked, since launching a dozen external apps at once is rarely
     // what's wanted. Everything below the first separator runs on the batch.
+    // Reading a file as text isn't in the menu — double-clicking a file does
+    // that, which is the more discoverable gesture.
     const sendableCount = targets.filter((t) => !t.is_dir).length;
     return [
       {
-        label: "Open",
+        label: "Open Locally",
         onSelect: () => handleOpenDefault(entry),
-        disabled: isDir,
-      },
-      {
-        label: "Open as Text",
-        onSelect: () => handleOpenAsText(entry),
         disabled: isDir,
       },
       {
@@ -1146,7 +1207,6 @@ export default function App() {
     selectedEntries,
     handleSend,
     handleOpenDefault,
-    handleOpenAsText,
     handleDeleteRemote,
     handleCreateRemote,
     handleCopyRemote,
@@ -1369,6 +1429,7 @@ export default function App() {
           error={viewer.error}
           truncated={viewer.truncated}
           size={viewer.size}
+          onSave={handleSaveViewer}
           onClose={() => setViewer(null)}
         />
       )}
