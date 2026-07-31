@@ -1079,16 +1079,46 @@ input {
 .text-viewer-body {
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  /* Row so the line-number gutter can sit beside the buffer. Scrolling is
+     owned by the textarea; the gutter follows it from JS. */
+  display: flex;
+  overflow: hidden;
   background: var(--bg);
   border-top: 1px solid var(--border);
+}
+
+/* Line numbers. Typography must match .text-viewer-area exactly (family,
+   size, line-height, vertical padding) or the columns drift apart as you
+   scroll. `overflow: hidden` keeps it from growing its own scrollbar — the
+   scroll position is set programmatically instead. The extra bottom padding
+   covers the textarea's horizontal scrollbar, which shortens its viewport and
+   would otherwise leave the last few numbers unreachable. */
+.text-viewer-gutter {
+  flex: 0 0 auto;
+  overflow: hidden;
+  box-sizing: content-box;
+  padding: 12px 8px 32px 12px;
+  border-right: 1px solid var(--border);
+  background: var(--bg-soft);
+  color: var(--text-dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  text-align: right;
+  white-space: pre;
+  font-variant-numeric: tabular-nums;
+  /* Not part of the document text — dragging a selection across the buffer
+     shouldn't pick up row numbers. */
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 /* Editable buffer. Styled to read like the old <pre> so switching the viewer
    to an editor didn't change how files look. */
 .text-viewer-area {
   display: block;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   height: 100%;
   box-sizing: border-box;
   margin: 0;
@@ -1108,6 +1138,12 @@ input {
   tab-size: 4;
 }
 
+/* The loading state is the body's only child while a file is in flight, so it
+   has to claim the row to stay centered. */
+.text-viewer-body > .loading {
+  flex: 1;
+}
+
 .text-viewer-area.wrap {
   white-space: pre-wrap;
   word-break: break-word;
@@ -1120,4 +1156,128 @@ input {
 /* Unsaved-changes marker next to the filename in the modal header. */
 .text-viewer-dirty {
   color: var(--accent);
+}
+
+/* ---------- Find / replace bar inside the viewer (Ctrl+F / Ctrl+R) ---------- */
+
+/* Sits between the header and the buffer so it never covers the text it is
+   searching — an overlay panel would hide the first hits in a short file. */
+.text-viewer-find {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--bg-soft);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.find-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.find-icon {
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.find-input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12.5px;
+  outline: none;
+}
+
+.find-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.find-input::placeholder {
+  color: var(--text-dim);
+}
+
+/* Fixed width so the row doesn't jitter as the hit count changes while typing. */
+.find-count {
+  min-width: 70px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.find-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+/* Stacking context for the buffer and the highlight mirror behind it. */
+.text-viewer-buffer {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+.text-viewer-buffer .text-viewer-area {
+  /* Above the mirror, so the caret and the real glyphs stay on top. */
+  position: relative;
+  z-index: 1;
+}
+
+/* Mirror of the buffer that paints the search hits — a textarea can't style
+   its own content. Every property that affects glyph placement must match
+   .text-viewer-area exactly (family, size, line-height, padding, tab-size,
+   white-space) or the boxes drift off the words. The text itself is
+   transparent: the visible characters come from the textarea stacked above,
+   so selection and caret behaviour are untouched. Scroll position is pushed
+   from JS, like the gutter; the extra bottom padding covers the textarea's
+   horizontal scrollbar. */
+.text-viewer-highlights {
+  --match: rgba(210, 153, 34, 0.35);
+  --match-active: rgba(210, 153, 34, 0.7);
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  margin: 0;
+  /* Top and left must equal the textarea's padding — they place the glyphs.
+     Right and bottom are deliberately larger: the textarea's scrollbars eat
+     into its viewport, so the mirror needs the extra slack to be able to
+     scroll as far as the buffer does. */
+  padding: 12px 32px 32px 14px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  color: transparent;
+  white-space: pre;
+  tab-size: 4;
+}
+
+@media (prefers-color-scheme: light) {
+  .text-viewer-highlights {
+    --match: rgba(255, 196, 0, 0.4);
+    --match-active: rgba(255, 168, 0, 0.75);
+  }
+}
+
+.text-viewer-highlights mark {
+  background: var(--match);
+  color: transparent;
+  border-radius: 2px;
+}
+
+.text-viewer-highlights mark.active {
+  background: var(--match-active);
 }
