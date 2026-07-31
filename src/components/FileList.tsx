@@ -31,6 +31,9 @@ interface Props {
   /** Paths currently held in the clipboard in "cut" mode, dimmed to signal
    *  they're pending a move. */
   cutPaths?: ReadonlySet<string>;
+  /** Show the Permissions column. Off for local listings, where the backend
+   *  reports no mode bits and the column would be a full row of dashes. */
+  showPermissions?: boolean;
 }
 
 const NO_PATHS: ReadonlySet<string> = new Set<string>();
@@ -68,7 +71,9 @@ export function FileList({
   selectedPaths = NO_PATHS,
   onSelectionChange,
   cutPaths = NO_PATHS,
+  showPermissions = true,
 }: Props) {
+  const columnCount = showPermissions ? 4 : 3;
   // `null` sort key means "default" — server order, dirs-on-top. Clicking a
   // header cycles asc → desc → back to default. This keeps three visibly
   // distinct states, and asc/desc are guaranteed to differ from default
@@ -213,7 +218,7 @@ export function FileList({
               </button>
             </th>
             <th className="col-size">Size</th>
-            <th className="col-perms">Permissions</th>
+            {showPermissions && <th className="col-perms">Permissions</th>}
             <th className="col-time">
               <button
                 type="button"
@@ -236,7 +241,7 @@ export function FileList({
                 </button>
               </td>
               <td>—</td>
-              <td>—</td>
+              {showPermissions && <td>—</td>}
               <td>—</td>
             </tr>
           )}
@@ -289,7 +294,9 @@ export function FileList({
                   </button>
                 </td>
                 <td>{entry.is_dir ? "—" : humanSize(entry.size)}</td>
-                <td className="mono">{entry.permissions ?? "—"}</td>
+                {showPermissions && (
+                  <td className="mono">{entry.permissions ?? "—"}</td>
+                )}
                 <td>{formatTime(entry.modified)}</td>
               </tr>
             );
@@ -297,7 +304,7 @@ export function FileList({
 
           {sorted.length === 0 && (
             <tr>
-              <td colSpan={4} className="empty-row">
+              <td colSpan={columnCount} className="empty-row">
                 {filter ? `No matches for "${filter}"` : "Empty directory"}
               </td>
             </tr>

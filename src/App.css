@@ -67,16 +67,6 @@ input {
   font: inherit;
 }
 
-kbd {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 11px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-bottom-width: 2px;
-  border-radius: 4px;
-  padding: 1px 6px;
-}
-
 /* ---------- Layout ---------- */
 
 .app {
@@ -111,16 +101,14 @@ kbd {
   min-height: 0;
 }
 
-/* Top section: saved connections. Sized in viewport units (always definite)
-   so the panel never collapses regardless of how the parent grid resolves
-   its height — even with zero saved connections, header / label / hint
-   stay comfortably visible. Internal list scrolls when there are many. */
+/* The sidebar is now a single section: the pinned local card plus the saved
+   connections. It owns the whole column, and only the connections list
+   scrolls, so the local card can never be scrolled out of reach. */
 .connections-panel {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  flex: 0 0 45vh;
-  border-bottom: 1px solid var(--border);
+  flex: 1 1 auto;
 }
 
 .sidebar-header {
@@ -161,6 +149,15 @@ kbd {
      two the list overflows the fixed-height panel instead of scrolling. */
   flex: 1 1 auto;
   min-height: 0;
+}
+
+/* The pinned local card: a fixed one-row list above the scrolling one, with a
+   rule under it so the two groups read as separate. */
+.connection-list.pinned {
+  flex: 0 0 auto;
+  overflow: visible;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
 }
 
 .empty-hint {
@@ -213,6 +210,12 @@ kbd {
   color: var(--accent);
 }
 
+/* A connection with a live session that isn't the one on screen — the session
+   survives switching to the local card, and the green plug says so. */
+.connection-item.connected:not(.active) .connection-main svg {
+  color: var(--success);
+}
+
 .connection-text {
   display: flex;
   flex-direction: column;
@@ -232,6 +235,13 @@ kbd {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+/* Local path subtitle: truncate from the left so the most specific (tail)
+   part of a deep path stays readable. */
+.connection-sub.path {
+  direction: rtl;
+  text-align: left;
 }
 
 .connection-actions {
@@ -615,32 +625,7 @@ kbd {
   font-size: 11.5px;
 }
 
-/* ---------- Welcome / loading / banners ---------- */
-
-.welcome {
-  margin: auto;
-  text-align: center;
-  max-width: 420px;
-  padding: 32px;
-  color: var(--text-muted);
-}
-
-.welcome h1 {
-  color: var(--text);
-  margin: 0 0 12px;
-  font-size: 20px;
-  font-weight: 600;
-}
-
-.welcome p {
-  margin: 6px 0;
-}
-
-.welcome .hint {
-  margin-top: 18px;
-  font-size: 12px;
-  color: var(--text-dim);
-}
+/* ---------- Loading / banners ---------- */
 
 .loading {
   display: flex;
@@ -1013,123 +998,6 @@ kbd {
 }
 
 
-/* ---------- Local panel (sidebar bottom) ---------- */
-
-.local-panel {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  flex: 1 1 auto;
-}
-
-.local-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 14px 6px;
-  flex-shrink: 0;
-}
-
-.local-title {
-  text-transform: uppercase;
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  color: var(--text-dim);
-}
-
-.local-actions {
-  display: flex;
-  gap: 2px;
-}
-
-.local-cwd {
-  /* Extra vertical padding + fixed line-height so the row reserves its own
-     space and never gets visually clipped by the filter box below.
-     `flex-shrink: 0` is critical — this element lives in a flex column
-     with `min-height: 0` on the list, and without it the cwd row can be
-     squeezed shorter than its glyphs (descenders end up cut off). */
-  flex-shrink: 0;
-  padding: 4px 14px 8px;
-  line-height: 1.5;
-  font-size: 11px;
-  color: var(--text-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  direction: rtl;   /* show the most-specific (tail) part of long paths */
-  text-align: left;
-}
-
-.local-list-wrap {
-  /* Owns the flex space so the loading overlay can be `position: absolute`
-     without collapsing the underlying list. */
-  position: relative;
-  flex: 1 1 auto;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.local-list {
-  list-style: none;
-  margin: 0;
-  padding: 2px 8px 12px;
-  overflow-y: auto;
-  flex: 1 1 auto;
-  min-height: 0;
-}
-
-.local-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  background: transparent;
-  border: none;
-  padding: 5px 8px;
-  border-radius: var(--radius-sm);
-  text-align: left;
-  cursor: pointer;
-  color: var(--text);
-  min-width: 0;
-}
-
-.local-item:hover:not(:disabled) {
-  background: var(--bg-hover);
-}
-
-.local-item:disabled {
-  cursor: default;
-  color: var(--text-muted);
-}
-
-/* Files aren't navigable (no double-click behavior), so mute their color to
-   match how disabled dirs used to look, while keeping the button enabled so
-   right-click still fires. */
-.local-item.file {
-  cursor: default;
-  color: var(--text-muted);
-}
-
-.local-item span {
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.local-item .icon.dir {
-  color: var(--accent);
-}
-
-.local-item .icon.file {
-  color: var(--text-dim);
-}
-
-.empty-hint.small {
-  font-size: 11px;
-  padding: 8px 10px;
-}
-
 /* ---------- Context menu ---------- */
 
 .context-menu {
@@ -1175,70 +1043,7 @@ kbd {
 }
 
 
-/* ---------- Local-panel inline filter ---------- */
-
-.local-filter {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 4px 14px 8px;
-  padding: 5px 8px;
-  flex-shrink: 0;
-  background: var(--bg);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  transition: border-color 120ms ease, box-shadow 120ms ease;
-}
-
-.local-filter:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-soft);
-}
-
-.local-filter input {
-  flex: 1;
-  min-width: 0;
-  background: transparent;
-  border: none;
-  outline: none;
-  color: var(--text);
-  font-size: 12px;
-  padding: 0;
-}
-
-.local-filter input::placeholder {
-  color: var(--text-dim);
-}
-
-.local-filter-icon {
-  color: var(--text-dim);
-  flex-shrink: 0;
-}
-
-.local-filter-count {
-  font-size: 10px;
-  color: var(--text-dim);
-  flex-shrink: 0;
-}
-
-.local-filter-clear {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  color: var(--text-dim);
-  padding: 0;
-  flex-shrink: 0;
-}
-
-.local-filter-clear:hover {
-  color: var(--text);
-}
-
-
-/* ---------- Text viewer / editor (double-click a remote file) ---------- */
+/* ---------- Text viewer / editor (double-click a file) ---------- */
 
 .modal.text-viewer {
   /* Wider + taller than the connection form modal, since this one is meant

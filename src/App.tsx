@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { FilePlus, FolderPlus, Loader2, RefreshCcw } from "lucide-react";
+import {
+  FilePlus,
+  FolderOpen,
+  FolderPlus,
+  Home,
+  Loader2,
+  RefreshCcw,
+} from "lucide-react";
 import { openPath } from "@tauri-apps/plugin-opener";
 
 import "./App.css";
 import { Sidebar } from "./components/Sidebar";
-import { LocalBrowser } from "./components/LocalBrowser";
 import { ConnectionForm } from "./components/ConnectionForm";
 import { Breadcrumb } from "./components/Breadcrumb";
 import { FilterBar } from "./components/FilterBar";
@@ -15,7 +21,7 @@ import { TextViewer } from "./components/TextViewer";
 import { Toast } from "./components/Toast";
 
 import { ftpApi } from "./api/ftp";
-import { localApi, type LocalEntry } from "./api/local";
+import { localApi } from "./api/local";
 import {
   emptyProfile,
   loadProfiles,
@@ -35,6 +41,14 @@ interface Session {
   cwd: string;
 }
 
+/** What the main pane is showing. The local filesystem is treated as a
+ *  connection of its own — pinned at the top of the sidebar and selected on
+ *  startup — so browsing local files no longer needs a separate panel.
+ *
+ *  "remote" always means "the current `session`"; the session outlives a
+ *  switch back to local so files can still be sent to it. */
+type View = { kind: "local" } | { kind: "remote" };
+
 interface MenuState {
   x: number;
   y: number;
@@ -50,12 +64,6 @@ interface MenuState {
 interface Clipboard {
   mode: "copy" | "cut";
   entries: FileEntry[];
-}
-
-interface LocalMenuState {
-  x: number;
-  y: number;
-  entry: LocalEntry;
 }
 
 /** Drives the "New Folder" / "New File" dialog. `busy` and `error` are held
@@ -91,6 +99,23 @@ function parentOf(path: string): string {
   const trimmed = path.replace(/\/+$/, "");
   const idx = trimmed.lastIndexOf("/");
   return idx <= 0 ? "/" : trimmed.slice(0, idx);
+}
+
+/** Parent of a local path. The backend normalises separators to "/" even on
+ *  Windows, but a drive root ("C:/") still has to stop there instead of
+ *  walking up into a bogus "" or "/". Returns the input when already at a
+ *  root, which is how callers detect "can't go up". */
+function localParentOf(path: string): string {
+  if (!path) return path;
+  const trimmed = path.replace(/\/+$/, "");
+  // Drive root, e.g. "C:" after trimming — nowhere left to go.
+  if (/^[A-Za-z]:$/.test(trimmed)) return `${trimmed}/`;
+  const idx = trimmed.lastIndexOf("/");
+  if (idx < 0) return path;
+  if (idx === 0) return "/";
+  const parent = trimmed.slice(0, idx);
+  // "C:/Users" → "C:" needs its slash back to stay a valid path.
+  return /^[A-Za-z]:$/.test(parent) ? `${parent}/` : parent;
 }
 
 /** Join a remote directory and a basename with exactly one separator.
@@ -153,22 +178,42 @@ export default function App() {
   const [profilesLoaded, setProfilesLoaded] = useState(false);
   const [dialog, setDialog] = useState<DialogState>({ kind: "closed" });
 
-  // -- active remote session
+  // -- active remote session. `connectingId` is the profile a connect attempt
+  // is running for, so the sidebar can keep that card highlighted (and the
+  // main pane show "Connecting…") during the handshake, when there's no
+  // session to read the id from yet.
   const [session, setSession] = useState<Session | null>(null);
-  const [connecting, setConnecting] = useState(false);
+  const [connectingId, setConnectingId] = useState<string | null>(null);
+  const connecting = connectingId !== null;
 
   // -- remote directory browsing
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // -- local directory browsing (sidebar bottom panel)
+  // -- local directory browsing. Entries are normalised to FileEntry so the
+  // main pane's FileList (sorting, multi-select, filtering) works unchanged
+  // for local listings; the local backend simply has no permissions/symlink
+  // info to report.
   const [localCwd, setLocalCwd] = useState<string>("");
-  const [localEntries, setLocalEntries] = useState<LocalEntry[]>([]);
+  const [localEntries, setLocalEntries] = useState<FileEntry[]>([]);
   const [localLoading, setLocalLoading] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
 
-  // -- right-click menu on a remote file row
+  // -- which side the main pane shows. Local by default: the pinned card is
+  // usable before any server is configured.
+  const [view, setView] = useState<View>({ kind: "local" });
+  // A remote view with neither a session nor a connect in flight has nothing
+  // to render, so it degrades to local rather than showing an empty pane.
+  const isLocal = view.kind === "local" || (!session && !connecting);
+
+  // Everything the main pane renders reads through these, so the toolbar,
+  // file list, filter bar and shortcuts all follow the selected side.
+  const currentEntries = isLocal ? localEntries : entries;
+  const currentCwd = isLocal ? localCwd : (session?.cwd ?? "/");
+  const currentLoading = isLocal ? localLoading : loading;
+
+  // -- right-click menu on a file row (either side)
   const [menu, setMenu] = useState<MenuState | null>(null);
 
   // -- remote row selection, so Ctrl+C / Ctrl+X / Delete have a target.
@@ -184,8 +229,8 @@ export default function App() {
   // predictable sequence regardless of the order rows were clicked in.
   // Paths that vanished from the listing simply drop out.
   const selectedEntries = useMemo(
-    () => entries.filter((e) => selectedSet.has(e.path)),
-    [entries, selectedSet],
+    () => currentEntries.filter((e) => selectedSet.has(e.path)),
+    [currentEntries, selectedSet],
   );
 
   // -- copy/cut clipboard for remote entries
@@ -203,9 +248,6 @@ export default function App() {
       ),
     [clipboard],
   );
-
-  // -- right-click menu on a local file row
-  const [localMenu, setLocalMenu] = useState<LocalMenuState | null>(null);
 
   // -- in-app text preview of a remote file
   const [viewer, setViewer] = useState<ViewerState | null>(null);
@@ -258,8 +300,25 @@ export default function App() {
     setLocalError(null);
     try {
       const result = await localApi.list(path);
-      setLocalEntries(result.entries);
+      // Widen to FileEntry for the shared file list. The local backend
+      // reports neither POSIX permissions nor symlink status, so those
+      // columns stay empty rather than being faked.
+      setLocalEntries(
+        result.entries.map((e) => ({
+          name: e.name,
+          path: e.path,
+          size: e.size,
+          is_dir: e.is_dir,
+          is_symlink: false,
+          modified: e.modified,
+          permissions: null,
+        })),
+      );
       setLocalCwd(result.cwd || path);
+      // Stale selected paths are pruned by the `visibleEntries` effect, which
+      // sees whichever side is on screen — doing it here would clear the
+      // remote selection when a download refreshes the local listing in the
+      // background.
     } catch (e) {
       setLocalError(String(e));
     } finally {
@@ -292,14 +351,11 @@ export default function App() {
       try {
         const result = await ftpApi.list(sessionId, path);
         setEntries(result.entries);
-        // Drop selected paths the listing no longer has, so a batch action
-        // can never target something that was moved or deleted out from
-        // under it (by a paste, a delete, or another client).
-        const alive = new Set(result.entries.map((e) => e.path));
-        setSelectedPaths((prev) => {
-          const next = prev.filter((p) => alive.has(p));
-          return next.length === prev.length ? prev : next;
-        });
+        // Selected paths that vanished (moved, deleted, or changed by another
+        // client) are pruned by the `visibleEntries` effect. It's kept there
+        // rather than here because a refresh can run for the side that isn't
+        // on screen — an upload refreshes the remote listing while the local
+        // one is showing — and that must not touch the visible selection.
         setSession((prev) =>
           prev ? { ...prev, cwd: result.cwd || path } : prev,
         );
@@ -321,9 +377,14 @@ export default function App() {
           // ignore
         }
       }
-      setConnecting(true);
+      setConnectingId(profile.id);
       setError(null);
       setEntries([]);
+      // Switch the pane over right away so the connect shows its progress
+      // where the listing will appear.
+      setView({ kind: "remote" });
+      setSelectedPaths([]);
+      setFilterOpen(false);
       try {
         const result = await ftpApi.connect({
           protocol: profile.protocol,
@@ -342,9 +403,12 @@ export default function App() {
         await refreshAt(newSession.sessionId, newSession.cwd);
       } catch (e) {
         setSession(null);
+        // Nothing to show on the remote side, so fall back to local browsing
+        // instead of leaving an empty pane behind.
+        setView({ kind: "local" });
         setError(String(e));
       } finally {
-        setConnecting(false);
+        setConnectingId(null);
       }
     },
     [refreshAt, session],
@@ -363,12 +427,36 @@ export default function App() {
       setFilterOpen(false);
       setSelectedPaths([]);
       setClipboard(null);
+      // The remote pane has nothing left to show; the local card is always
+      // available, so land there.
+      setView({ kind: "local" });
     }
   }, [session]);
 
+  // Show the pinned local card. Reuses the existing state object when local
+  // is already selected so the "view changed" effect doesn't fire and wipe
+  // the selection on a redundant click.
+  const showLocal = useCallback(() => {
+    setView((v) => (v.kind === "local" ? v : { kind: "local" }));
+  }, []);
+
+  // Sidebar click on a saved connection: connect if it isn't the live
+  // session, otherwise just bring it back on screen (the session survives
+  // switching to local, so there's nothing to redo).
+  const handleSelectProfile = useCallback(
+    (profile: ConnectionProfile) => {
+      if (session?.profileId === profile.id) {
+        setView((v) => (v.kind === "remote" ? v : { kind: "remote" }));
+        return;
+      }
+      handleConnect(profile);
+    },
+    [session, handleConnect],
+  );
+
+  // Directory navigation for whichever side is on screen.
   const navigateTo = useCallback(
     (path: string) => {
-      if (!session) return;
       // Filtering is inherently per-directory — the query and match count
       // don't carry meaning after you leave the folder. Close the bar so it
       // doesn't linger over an unrelated listing. Filter text is kept so
@@ -378,20 +466,44 @@ export default function App() {
       // The clipboard deliberately survives navigation — that's the whole
       // point of cut/copy here.
       setSelectedPaths([]);
+      if (isLocal) {
+        refreshLocalAt(path);
+        return;
+      }
+      if (!session) return;
       refreshAt(session.sessionId, path);
     },
-    [refreshAt, session],
+    [isLocal, refreshAt, refreshLocalAt, session],
   );
 
+  const canGoUp = isLocal
+    ? !!localCwd && localParentOf(localCwd) !== localCwd
+    : !!session && session.cwd !== "/" && session.cwd !== "";
+
   const goUp = useCallback(() => {
+    if (isLocal) {
+      if (localCwd) navigateTo(localParentOf(localCwd));
+      return;
+    }
     if (!session) return;
     navigateTo(parentOf(session.cwd));
-  }, [navigateTo, session]);
+  }, [isLocal, localCwd, navigateTo, session]);
 
   const refresh = useCallback(() => {
+    if (isLocal) {
+      if (localCwd) refreshLocalAt(localCwd);
+      return;
+    }
     if (!session) return;
     refreshAt(session.sessionId, session.cwd);
-  }, [refreshAt, session]);
+  }, [isLocal, localCwd, refreshAt, refreshLocalAt, session]);
+
+  const goLocalHome = useCallback(() => {
+    localApi
+      .home()
+      .then((home) => refreshLocalAt(home))
+      .catch((e) => setLocalError(String(e)));
+  }, [refreshLocalAt]);
 
   // Save / update / delete profiles.
   const handleSubmitProfile = useCallback((profile: ConnectionProfile) => {
@@ -543,53 +655,8 @@ export default function App() {
     [session],
   );
 
-  // Double-click (and the name cell's click for folders). Folders navigate;
-  // files open in the built-in text editor, which is the fast path for the
-  // configs, scripts and logs this app mostly deals with. Opening a file in
-  // an external application stays available via the context menu's
-  // "Open Locally".
-  const openEntry = useCallback(
-    (entry: FileEntry) => {
-      if (entry.is_dir) {
-        navigateTo(entry.path);
-        return;
-      }
-      handleOpenAsText(entry);
-    },
-    [navigateTo, handleOpenAsText],
-  );
-
-  // The filter state persists across close/reopen, but must only actually
-  // filter the list while the bar is visible. Everything downstream reads
-  // this instead of `filter` directly.
-  const effectiveFilter = filterOpen ? filter : "";
-
-  // Rows the user can actually see. Ctrl+A selects exactly these, so a
-  // filtered "select all" doesn't quietly rope in hidden entries.
-  const visibleEntries = useMemo(
-    () =>
-      effectiveFilter.trim()
-        ? entries.filter((e) => matchesFilter(e.name, effectiveFilter))
-        : entries,
-    [entries, effectiveFilter],
-  );
-
-  const matchedCount = visibleEntries.length;
-
-  // Rows the filter hides must not stay selected — a batch delete acting on a
-  // row that isn't on screen would be a nasty surprise. Also catches entries
-  // that disappeared from the listing between refreshes.
-  useEffect(() => {
-    setSelectedPaths((prev) => {
-      if (prev.length === 0) return prev;
-      const visible = new Set(visibleEntries.map((e) => e.path));
-      const next = prev.filter((p) => visible.has(p));
-      return next.length === prev.length ? prev : next;
-    });
-  }, [visibleEntries]);
-
-  // ----- Local: open with system default app -----------------------------
-  const handleOpenLocal = useCallback(async (entry: LocalEntry) => {
+  // ----- Local: open with the system default app -------------------------
+  const handleOpenLocal = useCallback(async (entry: FileEntry) => {
     setError(null);
     try {
       await openPath(entry.path);
@@ -600,7 +667,7 @@ export default function App() {
   }, []);
 
   // ----- Local: open as text in the in-app editor -------------------------
-  const handleOpenLocalAsText = useCallback(async (entry: LocalEntry) => {
+  const handleOpenLocalAsText = useCallback(async (entry: FileEntry) => {
     if (entry.is_dir) return;
     const source = { kind: "local", path: entry.path } as const;
     setError(null);
@@ -633,6 +700,55 @@ export default function App() {
       });
     }
   }, []);
+
+  // Double-click (and the name cell's click for folders). Folders navigate;
+  // files open in the built-in text editor, which is the fast path for the
+  // configs, scripts and logs this app mostly deals with. Opening a file in
+  // an external application stays available via the context menu's
+  // "Open Locally" / "Open".
+  const openEntry = useCallback(
+    (entry: FileEntry) => {
+      if (entry.is_dir) {
+        navigateTo(entry.path);
+        return;
+      }
+      if (isLocal) {
+        handleOpenLocalAsText(entry);
+        return;
+      }
+      handleOpenAsText(entry);
+    },
+    [isLocal, navigateTo, handleOpenAsText, handleOpenLocalAsText],
+  );
+
+  // The filter state persists across close/reopen, but must only actually
+  // filter the list while the bar is visible. Everything downstream reads
+  // this instead of `filter` directly.
+  const effectiveFilter = filterOpen ? filter : "";
+
+  // Rows the user can actually see. Ctrl+A selects exactly these, so a
+  // filtered "select all" doesn't quietly rope in hidden entries.
+  const visibleEntries = useMemo(
+    () =>
+      effectiveFilter.trim()
+        ? currentEntries.filter((e) => matchesFilter(e.name, effectiveFilter))
+        : currentEntries,
+    [currentEntries, effectiveFilter],
+  );
+
+  const matchedCount = visibleEntries.length;
+
+  // Rows the filter hides must not stay selected — a batch delete acting on a
+  // row that isn't on screen would be a nasty surprise. Also catches entries
+  // that disappeared from the listing between refreshes.
+  useEffect(() => {
+    setSelectedPaths((prev) => {
+      if (prev.length === 0) return prev;
+      const visible = new Set(visibleEntries.map((e) => e.path));
+      const next = prev.filter((p) => visible.has(p));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [visibleEntries]);
 
   // ----- Save the edited text back to where it came from ------------------
   // Rethrows on failure so the editor can keep the draft on screen and show
@@ -925,15 +1041,139 @@ export default function App() {
     [session, clipboard, pasting, refreshAt],
   );
 
-  // Keyboard shortcuts. Defined after the remote clipboard handlers because
-  // the dependency array references them.
+  // ----- Delete local entries --------------------------------------------
+  // Batched like its remote counterpart, since the local listing now lives in
+  // the multi-select file list. Keeps going after a failure and reports what
+  // didn't work at the end.
+  const handleDeleteLocal = useCallback(
+    async (targets: FileEntry[]) => {
+      if (targets.length === 0) return;
+      const dirs = targets.filter((e) => e.is_dir).length;
+      let prompt: string;
+      if (targets.length === 1) {
+        const only = targets[0];
+        prompt = only.is_dir
+          ? `Delete local folder "${only.name}" and all its contents?\nThis cannot be undone.`
+          : `Delete local file "${only.name}"?`;
+      } else {
+        prompt =
+          `Delete ${targets.length} selected local items?` +
+          (dirs
+            ? `\nThis includes ${dirs} folder${dirs === 1 ? "" : "s"} and all their contents.`
+            : "") +
+          `\nThis cannot be undone.`;
+      }
+      if (!window.confirm(prompt)) return;
+
+      setLocalError(null);
+      const failures: string[] = [];
+      let deleted = 0;
+      for (const [i, entry] of targets.entries()) {
+        if (targets.length > 1) {
+          setStatus(`Deleting ${i + 1}/${targets.length}: ${entry.name}…`);
+        }
+        try {
+          await localApi.delete(entry.path);
+          deleted += 1;
+        } catch (e) {
+          failures.push(`${entry.name}: ${String(e)}`);
+        }
+      }
+      if (deleted > 0) {
+        setStatus(
+          deleted === 1 && targets.length === 1
+            ? `Deleted ${targets[0].name}`
+            : `Deleted ${deleted} item${deleted === 1 ? "" : "s"}`,
+        );
+      }
+      if (failures.length) {
+        setLocalError(
+          `Failed to delete ${failures.length} of ${targets.length}:\n${failures.join("\n")}`,
+        );
+      }
+      if (localCwd) refreshLocalAt(localCwd);
+    },
+    [localCwd, refreshLocalAt],
+  );
+
+  // ----- Local → remote upload -------------------------------------------
+  // Uses the remote session's current directory as the destination, matching
+  // how the remote → local "Send" action uses the local browser's cwd. Runs
+  // one transfer at a time: the session has a single control connection.
+  const handleUpload = useCallback(
+    async (targets: FileEntry[]) => {
+      if (targets.length === 0) return;
+      if (!session) {
+        setError("Not connected to a server.");
+        return;
+      }
+      const files = targets.filter((e) => !e.is_dir);
+      const skippedDirs = targets.length - files.length;
+      if (files.length === 0) {
+        setError("Uploading whole folders isn't supported yet.");
+        return;
+      }
+      setError(null);
+      const failures: string[] = [];
+      let written = "";
+      for (const [i, entry] of files.entries()) {
+        setStatus(
+          files.length > 1
+            ? `Uploading ${i + 1}/${files.length}: ${entry.name}…`
+            : `Uploading ${entry.name}…`,
+        );
+        try {
+          written = await ftpApi.upload(
+            session.sessionId,
+            entry.path,
+            session.cwd,
+          );
+        } catch (e) {
+          failures.push(`${entry.name}: ${String(e)}`);
+        }
+      }
+      const ok = files.length - failures.length;
+      if (failures.length) {
+        setError(
+          `Failed to upload ${failures.length} of ${files.length}:\n${failures.join("\n")}`,
+        );
+      }
+      if (ok > 0) {
+        setStatus(
+          ok === 1 && !skippedDirs
+            ? `Uploaded to ${written}`
+            : `Uploaded ${ok} file${ok === 1 ? "" : "s"} to ${session.cwd}${
+                skippedDirs ? ` (skipped ${skippedDirs} folder(s))` : ""
+              }`,
+        );
+      }
+      // Refresh the remote listing so the new files appear immediately.
+      refreshAt(session.sessionId, session.cwd);
+    },
+    [session, refreshAt],
+  );
+
+  // Switching sides invalidates the selection (paths belong to one side) and
+  // the filter (it describes one listing), so both reset. The clipboard is
+  // left alone: it's remote-only and surviving a detour through the local
+  // card is the point.
+  useEffect(() => {
+    setSelectedPaths([]);
+    setFilterOpen(false);
+  }, [view]);
+
+  // Keyboard shortcuts. Defined after the file handlers because the
+  // dependency array references them.
   //
-  // Ctrl+C / Ctrl+X / Ctrl+V drive the remote clipboard. Ctrl+F opens the
-  // filter, F5 refreshes the current listing. Esc is a stacked close: any
-  // open right-click menu first, then the filter bar, then the selection.
-  // (The text editor and the create dialog handle Esc themselves, and this
-  // handler bows out entirely while either is open.) Closing the filter keeps
-  // the current filter text so reopening (Ctrl+F) restores it.
+  // Ctrl+C / Ctrl+X / Ctrl+V drive the remote clipboard (there's no local
+  // clipboard yet, so they're inert on the local side). Ctrl+A selects the
+  // visible rows and Delete removes them on whichever side is showing.
+  // Ctrl+F opens the filter, F5 refreshes the current listing. Esc is a
+  // stacked close: any open right-click menu first, then the filter bar, then
+  // the selection. (The text editor and the create dialog handle Esc
+  // themselves, and this handler bows out entirely while either is open.)
+  // Closing the filter keeps the current filter text so reopening (Ctrl+F)
+  // restores it.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       // The create dialog and the text editor are modal: they own their
@@ -951,20 +1191,23 @@ export default function App() {
           el.tagName === "TEXTAREA" ||
           el.isContentEditable);
 
-      // Copy/Cut act on the selected rows; Paste targets the directory
-      // currently on screen; Ctrl+A selects every visible row.
       const mod = e.ctrlKey || e.metaKey;
-      if (mod && !e.shiftKey && !typing && !viewer && session) {
+
+      // Ctrl+A selects every visible row on either side.
+      if (mod && !e.shiftKey && !typing && e.key.toLowerCase() === "a") {
+        // Always preventDefault: the webview's own "select all text" is
+        // never what someone wants in a file listing.
+        e.preventDefault();
+        setSelectedPaths(visibleEntries.map((en) => en.path));
+        return;
+      }
+
+      // Copy/Cut act on the selected rows; Paste targets the directory
+      // currently on screen. Remote only.
+      if (mod && !e.shiftKey && !typing && !isLocal && session) {
         const key = e.key.toLowerCase();
         // Leave Ctrl+C alone when there's a text selection to copy.
         const hasTextSelection = !!window.getSelection()?.toString();
-        if (key === "a") {
-          // Always preventDefault: the webview's own "select all text" is
-          // never what someone wants in a file listing.
-          e.preventDefault();
-          setSelectedPaths(visibleEntries.map((en) => en.path));
-          return;
-        }
         if (key === "c" && selectedEntries.length && !hasTextSelection) {
           e.preventDefault();
           handleCopyRemote(selectedEntries);
@@ -986,40 +1229,36 @@ export default function App() {
       if (
         e.key === "Delete" &&
         !typing &&
-        !viewer &&
         !mod &&
-        session &&
-        !pasting &&
-        selectedEntries.length
+        selectedEntries.length &&
+        (isLocal || (!!session && !pasting))
       ) {
         e.preventDefault();
-        handleDeleteRemote(selectedEntries);
+        if (isLocal) handleDeleteLocal(selectedEntries);
+        else handleDeleteRemote(selectedEntries);
         return;
       }
 
       const isFind = mod && e.key.toLowerCase() === "f";
       if (isFind) {
-        if (!session) return;
         e.preventDefault();
         setFilterOpen(true);
         return;
       }
-      // F5 / Ctrl+R → refresh the remote listing. Preventing default keeps
+      // F5 / Ctrl+R → refresh the current listing. Preventing default keeps
       // the browser from reloading the whole webview, which would drop the
       // session state.
       const isRefresh = e.key === "F5" || (mod && e.key.toLowerCase() === "r");
       if (isRefresh) {
         e.preventDefault();
-        if (!session || loading) return;
-        refreshAt(session.sessionId, session.cwd);
+        if (currentLoading) return;
+        refresh();
         return;
       }
       if (e.key !== "Escape") return;
 
       if (menu) {
         setMenu(null);
-      } else if (localMenu) {
-        setLocalMenu(null);
       } else if (filterOpen) {
         setFilterOpen(false);
       } else if (selectedPaths.length) {
@@ -1032,14 +1271,14 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [
     filterOpen,
+    isLocal,
     session,
     viewer,
     menu,
-    localMenu,
     createDialog,
-    loading,
+    currentLoading,
     pasting,
-    refreshAt,
+    refresh,
     selectedPaths,
     selectedEntries,
     visibleEntries,
@@ -1048,59 +1287,13 @@ export default function App() {
     handleCutRemote,
     handlePasteRemote,
     handleDeleteRemote,
+    handleDeleteLocal,
   ]);
-
-  // ----- Delete a local entry --------------------------------------------
-  const handleDeleteLocal = useCallback(
-    async (entry: LocalEntry) => {
-      const prompt = entry.is_dir
-        ? `Delete local folder "${entry.name}" and all its contents?\nThis cannot be undone.`
-        : `Delete local file "${entry.name}"?`;
-      const ok = window.confirm(prompt);
-      if (!ok) return;
-      setLocalError(null);
-      try {
-        await localApi.delete(entry.path);
-        setStatus(`Deleted ${entry.name}`);
-        if (localCwd) refreshLocalAt(localCwd);
-      } catch (e) {
-        setLocalError(String(e));
-      }
-    },
-    [localCwd, refreshLocalAt],
-  );
-
-  // ----- Local → remote upload -------------------------------------------
-  // Uses the remote session's current directory as the destination, matching
-  // how the remote → local "Send" action uses the local panel's cwd.
-  const handleUpload = useCallback(
-    async (entry: LocalEntry) => {
-      if (!session) {
-        setError("Not connected to a server.");
-        return;
-      }
-      if (entry.is_dir) {
-        setError("Uploading whole folders isn't supported yet.");
-        return;
-      }
-      setError(null);
-      try {
-        const written = await ftpApi.upload(session.sessionId, entry.path, session.cwd);
-        setStatus(`Uploaded to ${written}`);
-        // Refresh the remote panel so the new file appears immediately.
-        refreshAt(session.sessionId, session.cwd);
-      } catch (e) {
-        setError(String(e));
-      }
-    },
-    [session, refreshAt],
-  );
 
   // Build the context menu items lazily so the destination is always up-to-
   // date when the user clicks (they may have navigated locally first).
   const menuItems = useMemo<ContextMenuItem[]>(() => {
-    if (!menu || !session) return [];
-    const target = localCwd || "(no folder)";
+    if (!menu) return [];
     const entry = menu.entry;
 
     // What the batch actions act on. Right-clicking a row inside the current
@@ -1116,6 +1309,48 @@ export default function App() {
           : [];
     const batch = targets.length > 1;
     const batchLabel = describeBatch(targets);
+
+    // ----- Local side -----
+    // No folder/file creation and no clipboard here — the local backend only
+    // exposes open, upload and delete — so an empty-space click has nothing
+    // to offer and the menu is suppressed by the caller instead.
+    if (isLocal) {
+      if (!entry) return [];
+      const uploadable = targets.filter((t) => !t.is_dir).length;
+      const remoteTarget = session?.cwd ?? "";
+      return [
+        { label: "Open", onSelect: () => handleOpenLocal(entry) },
+        {
+          label: "Open as Text",
+          onSelect: () => handleOpenLocalAsText(entry),
+          disabled: entry.is_dir,
+        },
+        {
+          label: !session
+            ? "Send to FTP (not connected)"
+            : uploadable === 0
+              ? "Send to FTP (folders not supported)"
+              : batch
+                ? `Send ${uploadable} file${uploadable === 1 ? "" : "s"} → ${remoteTarget}`
+                : `Send to FTP → ${remoteTarget}`,
+          onSelect: () => handleUpload(targets),
+          disabled: !session || uploadable === 0,
+        },
+        { label: "sep-local-delete", separator: true, onSelect: () => {} },
+        {
+          label: batch
+            ? `Delete ${batchLabel}…`
+            : entry.is_dir
+              ? "Delete folder…"
+              : "Delete",
+          onSelect: () => handleDeleteLocal(targets),
+        },
+      ];
+    }
+
+    // ----- Remote side -----
+    if (!session) return [];
+    const target = localCwd || "(no folder)";
 
     // Right-clicking a folder targets *inside* it, matching how desktop file
     // managers behave; anywhere else targets the directory on screen. Applies
@@ -1199,6 +1434,7 @@ export default function App() {
     ];
   }, [
     menu,
+    isLocal,
     session,
     localCwd,
     clipboard,
@@ -1212,39 +1448,6 @@ export default function App() {
     handleCopyRemote,
     handleCutRemote,
     handlePasteRemote,
-  ]);
-
-  const localMenuItems = useMemo<ContextMenuItem[]>(() => {
-    if (!localMenu) return [];
-    const isDir = localMenu.entry.is_dir;
-    const remoteTarget = session?.cwd ?? "(not connected)";
-    return [
-      {
-        label: "Open",
-        onSelect: () => handleOpenLocal(localMenu.entry),
-      },
-      {
-        label: "Open as Text",
-        onSelect: () => handleOpenLocalAsText(localMenu.entry),
-        disabled: isDir,
-      },
-      {
-        label: isDir
-          ? "Send to FTP (folders not supported)"
-          : session
-            ? `Send to FTP → ${remoteTarget}`
-            : "Send to FTP (not connected)",
-        onSelect: () => handleUpload(localMenu.entry),
-        disabled: isDir || !session,
-      },
-      {
-        label: isDir ? "Delete folder…" : "Delete",
-        onSelect: () => handleDeleteLocal(localMenu.entry),
-      },
-    ];
-  }, [
-    localMenu,
-    session,
     handleOpenLocal,
     handleOpenLocalAsText,
     handleUpload,
@@ -1256,30 +1459,25 @@ export default function App() {
       <aside className="sidebar">
         <Sidebar
           profiles={profiles}
-          activeProfileId={session?.profileId ?? null}
+          selectedProfileId={
+            isLocal ? null : (connectingId ?? session?.profileId ?? null)
+          }
+          connectedProfileId={session?.profileId ?? null}
           connecting={connecting}
+          localPath={localCwd}
+          onSelectLocal={showLocal}
           onAdd={() => setDialog({ kind: "add" })}
           onEdit={(profile) => setDialog({ kind: "edit", profile })}
           onDelete={handleDeleteProfile}
-          onConnect={handleConnect}
+          onSelectProfile={handleSelectProfile}
           onDisconnect={handleDisconnect}
-        />
-        <LocalBrowser
-          cwd={localCwd}
-          entries={localEntries}
-          loading={localLoading}
-          onNavigate={refreshLocalAt}
-          onGoHome={() => localApi.home().then(refreshLocalAt)}
-          onRefresh={() => localCwd && refreshLocalAt(localCwd)}
-          onOpenInSystem={openLocalCwd}
-          onContextMenu={(entry, x, y) => setLocalMenu({ entry, x, y })}
         />
       </aside>
 
       <main className="main">
         <header className="toolbar">
           <div className="toolbar-left">
-            <Breadcrumb path={session?.cwd ?? "/"} onNavigate={navigateTo} />
+            <Breadcrumb path={currentCwd || "/"} onNavigate={navigateTo} />
             {/* Ctrl+A can select rows that are scrolled out of view, so the
                 count is the only reliable feedback on how big the batch is. */}
             {selectedPaths.length > 1 && (
@@ -1289,49 +1487,60 @@ export default function App() {
             )}
           </div>
           <div className="toolbar-right">
-            <button
-              className="icon-btn"
-              onClick={() => session && handleCreateRemote("dir", session.cwd)}
-              disabled={!session || loading}
-              title="New folder here"
-            >
-              <FolderPlus size={16} />
-            </button>
-            <button
-              className="icon-btn"
-              onClick={() => session && handleCreateRemote("file", session.cwd)}
-              disabled={!session || loading}
-              title="New empty file here"
-            >
-              <FilePlus size={16} />
-            </button>
+            {/* The local side has no create commands in the backend, so it
+                gets navigation shortcuts instead: reveal in the OS file
+                manager, and jump back to the home directory. */}
+            {isLocal ? (
+              <>
+                <button
+                  className="icon-btn"
+                  onClick={openLocalCwd}
+                  disabled={!localCwd}
+                  title="Open in system file manager"
+                >
+                  <FolderOpen size={16} />
+                </button>
+                <button
+                  className="icon-btn"
+                  onClick={goLocalHome}
+                  disabled={localLoading}
+                  title="Go to home directory"
+                >
+                  <Home size={16} />
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  className="icon-btn"
+                  onClick={() => session && handleCreateRemote("dir", session.cwd)}
+                  disabled={!session || loading}
+                  title="New folder here"
+                >
+                  <FolderPlus size={16} />
+                </button>
+                <button
+                  className="icon-btn"
+                  onClick={() => session && handleCreateRemote("file", session.cwd)}
+                  disabled={!session || loading}
+                  title="New empty file here"
+                >
+                  <FilePlus size={16} />
+                </button>
+              </>
+            )}
             <button
               className="icon-btn"
               onClick={refresh}
-              disabled={!session || loading}
+              disabled={currentLoading || (!isLocal && !session)}
               title="Refresh"
             >
-              <RefreshCcw size={16} className={loading ? "spin" : ""} />
+              <RefreshCcw size={16} className={currentLoading ? "spin" : ""} />
             </button>
           </div>
         </header>
 
-        {!session ? (
-          <div className="welcome">
-            <h1>Welcome to SuperFTP</h1>
-            <p>
-              Pick a saved connection on the left, or add a new one with the +
-              button to get started.
-            </p>
-            <p className="hint">
-              Tip: once connected, press <kbd>Ctrl</kbd> + <kbd>F</kbd> to filter
-              files in the current directory. <kbd>Ctrl</kbd> or{" "}
-              <kbd>Shift</kbd> + click picks several at a time,{" "}
-              <kbd>Ctrl</kbd> + <kbd>A</kbd> takes the lot — then copy, cut or
-              delete them in one go.
-            </p>
-          </div>
-        ) : connecting ? (
+        {connecting && !isLocal ? (
           <div className="loading">
             <Loader2 size={20} className="spin" />
             <span>Connecting…</span>
@@ -1342,8 +1551,8 @@ export default function App() {
           // visible underneath so the user retains context.
           <div className="file-list-container">
             <FileList
-              entries={entries}
-              canGoUp={session.cwd !== "/" && session.cwd !== ""}
+              entries={currentEntries}
+              canGoUp={canGoUp}
               onOpen={openEntry}
               onGoUp={goUp}
               filter={effectiveFilter}
@@ -1355,12 +1564,17 @@ export default function App() {
                 if (!selectedSet.has(entry.path)) setSelectedPaths([entry.path]);
                 setMenu({ entry, x, y });
               }}
-              onContextMenuBlank={(x, y) => setMenu({ entry: null, x, y })}
+              // Empty-space actions are all remote (create / paste); the local
+              // side would show an empty menu, so it doesn't open one.
+              onContextMenuBlank={
+                isLocal ? undefined : (x, y) => setMenu({ entry: null, x, y })
+              }
               selectedPaths={selectedSet}
               onSelectionChange={setSelectedPaths}
-              cutPaths={cutPaths}
+              cutPaths={isLocal ? undefined : cutPaths}
+              showPermissions={!isLocal}
             />
-            {loading && (
+            {currentLoading && (
               <div className="loading-overlay" aria-live="polite">
                 <div className="loading-badge">
                   <Loader2 size={14} className="spin" />
@@ -1378,7 +1592,7 @@ export default function App() {
           <FilterBar
             value={filter}
             matched={matchedCount}
-            total={entries.length}
+            total={currentEntries.length}
             onChange={setFilter}
             // Keep the filter text so reopening (Ctrl+F) restores the last
             // query. Users who want to clear can just backspace it.
@@ -1393,15 +1607,6 @@ export default function App() {
           y={menu.y}
           items={menuItems}
           onClose={() => setMenu(null)}
-        />
-      )}
-
-      {localMenu && (
-        <ContextMenu
-          x={localMenu.x}
-          y={localMenu.y}
-          items={localMenuItems}
-          onClose={() => setLocalMenu(null)}
         />
       )}
 
