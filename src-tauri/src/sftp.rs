@@ -245,7 +245,7 @@ pub async fn create_dir(holder: &mut SftpHolder, path: &str) -> FtpResult<()> {
 pub async fn create_file(holder: &mut SftpHolder, path: &str) -> FtpResult<()> {
     let target = resolve_path(&holder.cwd, path);
     let mut file = holder.sftp.create(target).await.map_err(map_sftp)?;
-    file.flush().await.map_err(map_sftp)?;
+    file.flush().await.map_err(map_io)?;
     Ok(())
 }
 
@@ -441,10 +441,49 @@ fn format_unix_mode(mode: u32) -> String {
     )
 }
 
+/// Map a transport-level SSH failure.
+///
+/// Anything that means the tunnel is gone becomes [`FtpError::Disconnected`],
+/// which is the signal the dispatcher uses to rebuild the session and replay
+/// the command. Key-exchange and auth problems stay `Protocol`: retrying those
+/// would just fail again, more slowly.
 fn map_ssh(e: russh::Error) -> FtpError {
-    FtpError::Protocol(format!("SSH error: {e}"))
+    use russh::Error as E;
+    let message = format!("SSH error: {e}");
+    match e {
+        E::Disconnect
+        | E::HUP
+        | E::ConnectionTimeout
+        | E::KeepaliveTimeout
+        | E::InactivityTimeout
+        | E::SendError
+        | E::RecvError
+        | E::WrongChannel
+        | E::IO(_)
+        | E::Elapsed(_) => FtpError::Disconnected(message),
+        _ => FtpError::Protocol(message),
+    }
 }
 
-fn map_sftp<E: std::fmt::Display>(e: E) -> FtpError {
-    FtpError::Protocol(format!("SFTP error: {e}"))
+/// Map an SFTP-subsystem failure.
+///
+/// `Status` carries a server-side result code (no such file, permission
+/// denied, ...) and describes a healthy connection refusing a request, so it
+/// must not trigger a reconnect. Everything else here means the channel
+/// underneath us stopped working.
+fn map_sftp(e: russh_sftp::client::error::Error) -> FtpError {
+    use russh_sftp::client::error::Error as E;
+    let message = format!("SFTP error: {e}");
+    match e {
+        E::Status(_) | E::Limited(_) => FtpError::Protocol(message),
+        E::IO(_) | E::Timeout | E::UnexpectedPacket | E::UnexpectedBehavior(_) => {
+            FtpError::Disconnected(message)
+        }
+    }
+}
+
+/// Map an I/O error raised while reading from or writing to an SFTP file
+/// handle. These come from the stream itself, so they mean the channel died.
+fn map_io(e: std::io::Error) -> FtpError {
+    FtpError::Disconnected(format!("SFTP error: {e}"))
 }

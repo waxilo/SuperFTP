@@ -3,7 +3,7 @@ mod local;
 mod sftp;
 mod transfer;
 
-use tauri::State;
+use tauri::{Manager, State};
 
 use crate::ftp::{ConnectRequest, ConnectResult, FtpResult, FtpState, ListResult};
 use crate::local::{LocalListResult, LocalResult};
@@ -204,6 +204,18 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .manage(FtpState::default())
+        .setup(|app| {
+            // The state needs a way to reach the frontend so a reconnect can
+            // announce itself instead of looking like a stall.
+            app.state::<FtpState>().attach(app.handle().clone());
+            // Idle control connections get closed by the server (and by NAT
+            // devices in between) after a few minutes of silence. Poking them
+            // periodically stops that from happening at all, and repairs any
+            // that already went away, so the next click doesn't fail.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(ftp::keepalive_loop(handle));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             ftp_connect,
             ftp_disconnect,

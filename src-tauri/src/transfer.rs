@@ -1,7 +1,10 @@
 //! Transfers between an active remote session and the local filesystem.
 //!
-//! Currently supports remote → local downloads only. Uploads are planned but
-//! not wired yet.
+//! Every operation goes through `with_session!`, which means each one may be
+//! run twice: once against a link that turned out to be dead, then again after
+//! the connection was rebuilt. All of them are written to be safe to repeat —
+//! they re-read the remote directory before acting rather than resuming
+//! mid-flight.
 
 use std::path::{Path, PathBuf};
 
@@ -9,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
-use crate::ftp::{FtpError, FtpResult, FtpState, Session};
+use crate::ftp::{Connection, FtpError, FtpResult, FtpState, with_session};
 use crate::local;
 
 /// Result of [`read_text`]. `truncated` is true when the remote file was
@@ -36,15 +39,14 @@ pub async fn download(
 ) -> FtpResult<String> {
     let local_path = resolve_local_target(remote_path, local_dir)?;
 
-    let mut sessions = state.sessions.lock().await;
-    let session = sessions
-        .get_mut(session_id)
-        .ok_or_else(|| FtpError::SessionNotFound(session_id.to_string()))?;
-
-    match session {
-        Session::Ftp(stream) => download_ftp(stream, remote_path, &local_path).await?,
-        Session::Sftp(holder) => crate::sftp::download(holder, remote_path, &local_path).await?,
-    }
+    with_session!(state, session_id, |s| {
+        match s.conn_mut() {
+            Connection::Ftp(stream) => download_ftp(stream, remote_path, &local_path).await,
+            Connection::Sftp(holder) => {
+                crate::sftp::download(holder, remote_path, &local_path).await
+            }
+        }
+    })?;
 
     Ok(local::normalize_path(&local_path))
 }
@@ -136,28 +138,24 @@ pub async fn delete_remote(
     remote_path: &str,
     is_dir: bool,
 ) -> FtpResult<()> {
-    let mut sessions = state.sessions.lock().await;
-    let session = sessions
-        .get_mut(session_id)
-        .ok_or_else(|| FtpError::SessionNotFound(session_id.to_string()))?;
-
-    match session {
-        Session::Ftp(stream) => {
-            if is_dir {
-                delete_dir_recursive_ftp(stream, remote_path).await?;
-            } else {
-                stream.rm(remote_path).await?;
+    with_session!(state, session_id, |s| {
+        match s.conn_mut() {
+            Connection::Ftp(stream) => {
+                if is_dir {
+                    delete_dir_recursive_ftp(stream, remote_path).await
+                } else {
+                    stream.rm(remote_path).await.map_err(FtpError::from)
+                }
+            }
+            Connection::Sftp(holder) => {
+                if is_dir {
+                    crate::sftp::delete_dir_recursive(holder, remote_path).await
+                } else {
+                    crate::sftp::delete_file(holder, remote_path).await
+                }
             }
         }
-        Session::Sftp(holder) => {
-            if is_dir {
-                crate::sftp::delete_dir_recursive(holder, remote_path).await?;
-            } else {
-                crate::sftp::delete_file(holder, remote_path).await?;
-            }
-        }
-    }
-    Ok(())
+    })
 }
 
 /// Recursively delete an FTP directory. Boxed so the future is `Sized`,
@@ -242,21 +240,18 @@ pub async fn remote_exists(
     session_id: &str,
     remote_path: &str,
 ) -> FtpResult<ExistsResult> {
-    let mut sessions = state.sessions.lock().await;
-    let session = sessions
-        .get_mut(session_id)
-        .ok_or_else(|| FtpError::SessionNotFound(session_id.to_string()))?;
-
-    match session {
-        Session::Ftp(stream) => exists_ftp(stream, remote_path).await,
-        Session::Sftp(holder) => {
-            let found = crate::sftp::stat(holder, remote_path).await?;
-            Ok(ExistsResult {
-                exists: found.is_some(),
-                is_dir: found.unwrap_or(false),
-            })
+    with_session!(state, session_id, |s| {
+        match s.conn_mut() {
+            Connection::Ftp(stream) => exists_ftp(stream, remote_path).await,
+            Connection::Sftp(holder) => {
+                let found = crate::sftp::stat(holder, remote_path).await?;
+                Ok(ExistsResult {
+                    exists: found.is_some(),
+                    is_dir: found.unwrap_or(false),
+                })
+            }
         }
-    }
+    })
 }
 
 /// FTP has no portable "does this path exist" command — SIZE is refused for
@@ -302,18 +297,12 @@ pub async fn create_dir_remote(
     session_id: &str,
     remote_path: &str,
 ) -> FtpResult<()> {
-    let mut sessions = state.sessions.lock().await;
-    let session = sessions
-        .get_mut(session_id)
-        .ok_or_else(|| FtpError::SessionNotFound(session_id.to_string()))?;
-
-    match session {
-        Session::Ftp(stream) => {
-            stream.mkdir(remote_path).await?;
+    with_session!(state, session_id, |s| {
+        match s.conn_mut() {
+            Connection::Ftp(stream) => stream.mkdir(remote_path).await.map_err(FtpError::from),
+            Connection::Sftp(holder) => crate::sftp::create_dir(holder, remote_path).await,
         }
-        Session::Sftp(holder) => crate::sftp::create_dir(holder, remote_path).await?,
-    }
-    Ok(())
+    })
 }
 
 /// Create an empty file at `remote_path`.
@@ -326,23 +315,23 @@ pub async fn create_file_remote(
     session_id: &str,
     remote_path: &str,
 ) -> FtpResult<()> {
-    let mut sessions = state.sessions.lock().await;
-    let session = sessions
-        .get_mut(session_id)
-        .ok_or_else(|| FtpError::SessionNotFound(session_id.to_string()))?;
-
-    match session {
-        Session::Ftp(stream) => {
-            // A zero-byte STOR: open the data channel, write nothing, then
-            // finalize so the server sends its completion reply and the
-            // control connection stays usable.
-            let mut data = stream.put_with_stream(remote_path).await?;
-            data.flush().await.map_err(io_err)?;
-            stream.finalize_put_stream(data).await?;
+    with_session!(state, session_id, |s| {
+        match s.conn_mut() {
+            Connection::Ftp(stream) => {
+                // A zero-byte STOR: open the data channel, write nothing, then
+                // finalize so the server sends its completion reply and the
+                // control connection stays usable.
+                async {
+                    let mut data = stream.put_with_stream(remote_path).await?;
+                    data.flush().await.map_err(io_err)?;
+                    stream.finalize_put_stream(data).await?;
+                    Ok(())
+                }
+                .await
+            }
+            Connection::Sftp(holder) => crate::sftp::create_file(holder, remote_path).await,
         }
-        Session::Sftp(holder) => crate::sftp::create_file(holder, remote_path).await?,
-    }
-    Ok(())
+    })
 }
 
 /// Move a remote entry to `to`, which is a full destination path (not a
@@ -358,18 +347,12 @@ pub async fn rename_remote(
     from: &str,
     to: &str,
 ) -> FtpResult<()> {
-    let mut sessions = state.sessions.lock().await;
-    let session = sessions
-        .get_mut(session_id)
-        .ok_or_else(|| FtpError::SessionNotFound(session_id.to_string()))?;
-
-    match session {
-        Session::Ftp(stream) => {
-            stream.rename(from, to).await?;
+    with_session!(state, session_id, |s| {
+        match s.conn_mut() {
+            Connection::Ftp(stream) => stream.rename(from, to).await.map_err(FtpError::from),
+            Connection::Sftp(holder) => crate::sftp::rename(holder, from, to).await,
         }
-        Session::Sftp(holder) => crate::sftp::rename(holder, from, to).await?,
-    }
-    Ok(())
+    })
 }
 
 /// Copy a remote entry to `to`, recursing into directories.
@@ -386,31 +369,33 @@ pub async fn copy_remote(
     to: &str,
     is_dir: bool,
 ) -> FtpResult<()> {
-    let mut sessions = state.sessions.lock().await;
-    let session = sessions
-        .get_mut(session_id)
-        .ok_or_else(|| FtpError::SessionNotFound(session_id.to_string()))?;
+    with_session!(state, session_id, |s| {
+        match s.conn_mut() {
+            Connection::Ftp(stream) => {
+                async {
+                    // One scratch dir per copy operation, removed when we're
+                    // done. A replay after a reconnect gets a fresh one.
+                    let mut tmp = std::env::temp_dir();
+                    tmp.push("superftp-copy");
+                    tmp.push(uuid::Uuid::new_v4().to_string());
+                    tokio::fs::create_dir_all(&tmp).await.map_err(io_err)?;
 
-    match session {
-        Session::Ftp(stream) => {
-            // One scratch dir per copy operation, removed when we're done.
-            let mut tmp = std::env::temp_dir();
-            tmp.push("superftp-copy");
-            tmp.push(uuid::Uuid::new_v4().to_string());
-            tokio::fs::create_dir_all(&tmp).await.map_err(io_err)?;
+                    let result = if is_dir {
+                        copy_dir_recursive_ftp(stream, from, to, &tmp).await
+                    } else {
+                        copy_file_ftp(stream, from, to, &tmp).await
+                    };
 
-            let result = if is_dir {
-                copy_dir_recursive_ftp(stream, from, to, &tmp).await
-            } else {
-                copy_file_ftp(stream, from, to, &tmp).await
-            };
-
-            let _ = tokio::fs::remove_dir_all(&tmp).await;
-            result?;
+                    let _ = tokio::fs::remove_dir_all(&tmp).await;
+                    result
+                }
+                .await
+            }
+            Connection::Sftp(holder) => {
+                crate::sftp::copy_recursive(holder, from, to, is_dir).await
+            }
         }
-        Session::Sftp(holder) => crate::sftp::copy_recursive(holder, from, to, is_dir).await?,
-    }
-    Ok(())
+    })
 }
 
 /// Copy one FTP file via a local scratch file. Sequential RETR then STOR on
@@ -494,15 +479,12 @@ pub async fn upload(
         format!("{remote_dir}/{filename}")
     };
 
-    let mut sessions = state.sessions.lock().await;
-    let session = sessions
-        .get_mut(session_id)
-        .ok_or_else(|| FtpError::SessionNotFound(session_id.to_string()))?;
-
-    match session {
-        Session::Ftp(stream) => upload_ftp(stream, &local, &remote_path).await?,
-        Session::Sftp(holder) => crate::sftp::upload(holder, &local, &remote_path).await?,
-    }
+    with_session!(state, session_id, |s| {
+        match s.conn_mut() {
+            Connection::Ftp(stream) => upload_ftp(stream, &local, &remote_path).await,
+            Connection::Sftp(holder) => crate::sftp::upload(holder, &local, &remote_path).await,
+        }
+    })?;
 
     Ok(remote_path)
 }
@@ -522,22 +504,24 @@ pub async fn write_text(
 ) -> FtpResult<u64> {
     let bytes = content.as_bytes();
 
-    let mut sessions = state.sessions.lock().await;
-    let session = sessions
-        .get_mut(session_id)
-        .ok_or_else(|| FtpError::SessionNotFound(session_id.to_string()))?;
-
-    match session {
-        Session::Ftp(stream) => {
-            let mut data = stream.put_with_stream(remote_path).await?;
-            data.write_all(bytes).await.map_err(io_err)?;
-            data.flush().await.map_err(io_err)?;
-            // Same reasoning as every other STOR here: finalize so the server
-            // sends its completion reply and the session stays usable.
-            stream.finalize_put_stream(data).await?;
+    with_session!(state, session_id, |s| {
+        match s.conn_mut() {
+            Connection::Ftp(stream) => {
+                async {
+                    let mut data = stream.put_with_stream(remote_path).await?;
+                    data.write_all(bytes).await.map_err(io_err)?;
+                    data.flush().await.map_err(io_err)?;
+                    // Same reasoning as every other STOR here: finalize so the
+                    // server sends its completion reply and the session stays
+                    // usable.
+                    stream.finalize_put_stream(data).await?;
+                    Ok(())
+                }
+                .await
+            }
+            Connection::Sftp(holder) => crate::sftp::write_bytes(holder, remote_path, bytes).await,
         }
-        Session::Sftp(holder) => crate::sftp::write_bytes(holder, remote_path, bytes).await?,
-    }
+    })?;
 
     Ok(bytes.len() as u64)
 }
