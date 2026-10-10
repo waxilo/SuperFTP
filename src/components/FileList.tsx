@@ -137,7 +137,16 @@ export function FileList({
   );
 
   const sorted = useMemo(() => {
-    if (!sortKey) return filtered;
+    if (!sortKey) {
+      // A remote folder arrives in server pages, so grouping directories above
+      // files is the UI's job now — the backend can only ever have seen part of
+      // the listing. `sort` is stable, so within each group the server's own
+      // order survives, which is what makes this distinguishable from an
+      // explicit name sort.
+      return [...filtered].sort((a, b) =>
+        a.is_dir === b.is_dir ? 0 : a.is_dir ? -1 : 1,
+      );
+    }
     const dir = sortDir === "asc" ? 1 : -1;
     if (sortKey === "name") {
       return [...filtered].sort((a, b) => {

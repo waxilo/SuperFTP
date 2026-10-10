@@ -10,9 +10,20 @@ export interface ConnectRequest {
   passive: boolean;
 }
 
-export interface ListResult {
+/** One page of a streaming remote listing, as emitted on the
+ *  `remote-list-page` channel. Mirrors the backend's `ListPageEvent`. */
+export interface ListPageEvent {
+  session_id: string;
+  /** Echoed back from the `ftp_list` call that started this listing, so pages
+   *  of a navigation the user has already left can be dropped. */
+  request_id: number;
+  /** Canonical directory the page belongs to. */
   cwd: string;
   entries: FileEntry[];
+  /** First page of this listing — replace what's shown instead of appending. */
+  first: boolean;
+  /** Nothing more is coming for this `request_id`. */
+  done: boolean;
 }
 
 export interface ExistsResult {
@@ -31,13 +42,20 @@ export interface ReadTextResult {
   truncated: boolean;
 }
 
+export const EVENT_REMOTE_LIST_PAGE = "remote-list-page";
+
 export const ftpApi = {
   connect: (request: ConnectRequest) =>
     invoke<ConnectResult>("ftp_connect", { request }),
   disconnect: (sessionId: string) =>
     invoke<void>("ftp_disconnect", { sessionId }),
-  list: (sessionId: string, path: string) =>
-    invoke<ListResult>("ftp_list", { sessionId, path }),
+  /** Start a remote directory listing. Entries stream back on the
+   *  `remote-list-page` channel as the server reads the folder; this resolves
+   *  with the canonical directory when it's done. `requestId` is echoed on
+   *  every page — use a fresh one per navigation so a superseded listing can be
+   *  discarded as it arrives. */
+  list: (sessionId: string, path: string, requestId: number) =>
+    invoke<string>("ftp_list", { sessionId, path, requestId }),
   cd: (sessionId: string, path: string) =>
     invoke<string>("ftp_cd", { sessionId, path }),
   /** Download a remote file into a local directory. Returns the absolute

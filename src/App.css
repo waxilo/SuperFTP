@@ -1035,6 +1035,33 @@ input {
   color: var(--accent);
 }
 
+/* Corner counter for a remote folder that is still streaming in. Small and
+   off to the side on purpose: the rows already on screen are usable, so this
+   reports progress rather than blocking the pane. */
+.list-progress {
+  position: absolute;
+  right: 14px;
+  bottom: 12px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--glass-panel-strong);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  border: 1px solid var(--glass-hairline-strong);
+  box-shadow: var(--glass-shadow);
+  font-size: 11px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.list-progress .spin {
+  color: var(--accent);
+}
+
 .banner {
   padding: 8px 16px;
   font-size: 12px;
@@ -1319,6 +1346,28 @@ input[type="number"]::-webkit-outer-spin-button {
 
 .form-row .port {
   width: 100px;
+}
+
+/* Password field with its reveal toggle. The eye sits inside the input's right
+   padding so the field keeps the same box as the username field beside it. */
+.password-field {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.password-field input {
+  flex: 1;
+  min-width: 0;
+  padding-right: 32px;
+}
+
+.password-field .icon-btn {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  bottom: 3px;
+  height: auto;
 }
 
 /* Segmented control used as a protocol toggle (FTP / SFTP). */

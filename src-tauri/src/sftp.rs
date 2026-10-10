@@ -15,12 +15,12 @@ use std::path::Path;
 use chrono::{TimeZone, Utc};
 use russh::client::{self, Handle};
 use russh::keys::PublicKey;
-use russh_sftp::client::SftpSession;
-use russh_sftp::client::fs::DirEntry;
-use russh_sftp::protocol::FileAttributes;
-use tokio::io::AsyncWriteExt;
+use russh_sftp::client::error::Error as SftpError;
+use russh_sftp::client::{RawSftpSession, SftpSession};
+use russh_sftp::protocol::{FileAttributes, StatusCode};
 
-use crate::ftp::{FileEntry, FtpError, FtpResult, ListResult};
+use crate::ftp::{FileEntry, FtpError, FtpResult};
+use tokio::io::AsyncWriteExt;
 
 /// Holds an open SFTP session and everything required to keep it alive.
 ///
@@ -29,6 +29,15 @@ use crate::ftp::{FileEntry, FtpError, FtpResult, ListResult};
 pub struct SftpHolder {
     _ssh: Handle<SshClient>,
     sftp: SftpSession,
+    /// A second subsystem channel, used only for directory reads.
+    ///
+    /// `SftpSession::read_dir` drains the whole directory into one Vec before
+    /// it returns, and exposes no handle to resume from, so a large folder can
+    /// only be delivered all at once. `RawSftpSession` speaks the requests
+    /// directly (OPENDIR / READDIR / CLOSE), which lets each server page — 100
+    /// entries on the servers we've measured — be handed to the UI as it
+    /// lands. Requests are otherwise identical, so nothing is paid twice.
+    lister: RawSftpSession,
     cwd: String,
 }
 
@@ -91,6 +100,21 @@ pub async fn connect(
         .await
         .map_err(map_sftp)?;
 
+    // A dedicated channel for directory reads; see `SftpHolder::lister`.
+    // Opening it costs one handshake at connect time, and the server gets a
+    // second sftp-server worker that then sits idle between listings.
+    let lister_channel = session
+        .channel_open_session()
+        .await
+        .map_err(map_ssh)?;
+    lister_channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(map_ssh)?;
+    let lister = RawSftpSession::new(lister_channel.into_stream());
+    // Unlike `SftpSession`, the raw session doesn't negotiate on construction.
+    lister.init().await.map_err(map_sftp)?;
+
     // Resolve "." to the user's home directory so the UI shows a real
     // absolute path on first render.
     let cwd = sftp.canonicalize(".").await.map_err(map_sftp)?;
@@ -99,6 +123,7 @@ pub async fn connect(
         SftpHolder {
             _ssh: session,
             sftp,
+            lister,
             cwd: cwd.clone(),
         },
         cwd,
@@ -114,8 +139,20 @@ pub async fn disconnect(holder: SftpHolder) {
         .await;
 }
 
-/// List a directory. `path` may be absolute, relative, or empty (= cwd).
-pub async fn list_dir(holder: &mut SftpHolder, path: &str) -> FtpResult<ListResult> {
+/// List a directory, handing every page the server returns to `on_page` as it
+/// arrives. `path` may be absolute, relative, or empty (= cwd).
+///
+/// The pages come back in server order, ungrouped: with a folder that takes
+/// seconds to read there is no point waiting for the last page before the UI
+/// can put the first hundred rows on screen. Returns the canonical directory.
+///
+/// `on_page` runs while the task sits at an await point, hence the `Send`
+/// bound: without it the listing future can't be moved between threads.
+pub async fn list_dir_stream(
+    holder: &mut SftpHolder,
+    path: &str,
+    on_page: &mut (dyn FnMut(&str, Vec<FileEntry>) + Send),
+) -> FtpResult<String> {
     let target = resolve_path(&holder.cwd, path);
     // Canonicalize so the UI always shows the real path (resolving `.`/`..`
     // and symlinked dirs).
@@ -125,28 +162,48 @@ pub async fn list_dir(holder: &mut SftpHolder, path: &str) -> FtpResult<ListResu
         .await
         .map_err(map_sftp)?;
 
-    let read = holder.sftp.read_dir(&canon).await.map_err(map_sftp)?;
+    let handle = holder
+        .lister
+        .opendir(&canon)
+        .await
+        .map_err(map_sftp)?
+        .handle;
 
-    let mut entries: Vec<FileEntry> = read
-        .into_iter()
-        .filter(|e| e.file_name() != "." && e.file_name() != "..")
-        .map(|e| dir_entry_to_file(e, &canon))
-        .collect();
+    let mut failure: Option<FtpError> = None;
+    loop {
+        match holder.lister.readdir(handle.as_str()).await {
+            Ok(page) => {
+                let entries: Vec<FileEntry> = page
+                    .files
+                    .into_iter()
+                    // Hide the current and parent entries; the UI has its own.
+                    .filter(|f| f.filename != "." && f.filename != "..")
+                    .map(|f| file_entry(f.filename, &f.attrs, &canon))
+                    .collect();
+                if !entries.is_empty() {
+                    on_page(&canon, entries);
+                }
+            }
+            // EOF is the server's way of saying the directory is exhausted.
+            Err(SftpError::Status(status)) if status.status_code == StatusCode::Eof => break,
+            Err(err) => {
+                failure = Some(map_sftp(err));
+                break;
+            }
+        }
+    }
 
-    // Only group directories above files — leave server order intact
-    // within each group so the frontend's ascending/descending sort is
-    // visibly different from the "default" (unsorted) state.
-    entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
-        (true, false) => std::cmp::Ordering::Less,
-        (false, true) => std::cmp::Ordering::Greater,
-        _ => std::cmp::Ordering::Equal,
-    });
+    // A failed READDIR is the reportable problem; complaining about CLOSE on
+    // top of it would only bury it.
+    let _ = holder.lister.close(handle).await;
 
-    holder.cwd = canon.clone();
-    Ok(ListResult {
-        cwd: canon,
-        entries,
-    })
+    match failure {
+        Some(err) => Err(err),
+        None => {
+            holder.cwd = canon.clone();
+            Ok(canon)
+        }
+    }
 }
 
 /// Stream a remote file into the given local path. The local file is
@@ -385,9 +442,7 @@ pub async fn change_dir(holder: &mut SftpHolder, path: &str) -> FtpResult<String
     Ok(canon)
 }
 
-fn dir_entry_to_file(entry: DirEntry, cwd: &str) -> FileEntry {
-    let name = entry.file_name();
-    let attrs = entry.metadata();
+fn file_entry(name: String, attrs: &FileAttributes, cwd: &str) -> FileEntry {
     let path = join_path(cwd, &name);
 
     FileEntry {
@@ -396,7 +451,7 @@ fn dir_entry_to_file(entry: DirEntry, cwd: &str) -> FileEntry {
         size: attrs.size.unwrap_or(0) as usize,
         is_dir: attrs.is_dir(),
         is_symlink: attrs.is_symlink(),
-        modified: format_mtime(&attrs),
+        modified: format_mtime(attrs),
         permissions: attrs.permissions.map(format_unix_mode),
     }
 }

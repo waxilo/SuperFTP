@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { getVersion } from "@tauri-apps/api/app";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import "./App.css";
 import { Sidebar } from "./components/Sidebar";
@@ -25,7 +26,7 @@ import { TextViewer } from "./components/TextViewer";
 import { Toast } from "./components/Toast";
 import { TitleBar } from "./components/TitleBar";
 
-import { ftpApi } from "./api/ftp";
+import { ftpApi, EVENT_REMOTE_LIST_PAGE, type ListPageEvent } from "./api/ftp";
 import { localApi } from "./api/local";
 import { checkAndDownload, type ReadyUpdate } from "./api/update";
 import {
@@ -242,6 +243,20 @@ async function uniqueLocalName(
   throw new Error(`Couldn't find an unused name for a copy of "${name}".`);
 }
 
+/** Add one streamed page to the rows already on screen, keyed by path. The
+ *  dedupe matters because a session replays its command once after repairing a
+ *  dead link, so the pages of a failed attempt can overlap the retry's. */
+function appendEntries(prev: FileEntry[], page: FileEntry[]): FileEntry[] {
+  const seen = new Set(prev.map((e) => e.path));
+  const next = prev.slice();
+  for (const entry of page) {
+    if (seen.has(entry.path)) continue;
+    seen.add(entry.path);
+    next.push(entry);
+  }
+  return next;
+}
+
 export default function App() {
   // -- saved profiles persisted via tauri-plugin-store
   const [profiles, setProfiles] = useState<ConnectionProfile[]>([]);
@@ -260,6 +275,13 @@ export default function App() {
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A remote folder streams in page by page while the server reads it (see the
+  // `remote-list-page` listener). `streaming` is the "more rows are still
+  // coming" flag, and `listRequestRef` is the id of the listing we're waiting
+  // for — pages tagged with anything older belong to a folder the user has
+  // already left.
+  const [streaming, setStreaming] = useState(false);
+  const listRequestRef = useRef(0);
 
   // -- local directory browsing. Entries are normalised to FileEntry so the
   // main pane's FileList (sorting, multi-select, filtering) works unchanged
@@ -580,25 +602,65 @@ export default function App() {
     }
   }, [localCwd]);
 
+  // Remote listings arrive as pages rather than one payload, so the first
+  // hundred rows can be on screen while the server is still reading the rest
+  // of the folder. Everything keyed by `listRequestRef`: a page from a
+  // superseded navigation is dropped rather than merged into the new folder.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: UnlistenFn | null = null;
+    listen<ListPageEvent>(EVENT_REMOTE_LIST_PAGE, (event) => {
+      const page = event.payload;
+      if (disposed || page.request_id !== listRequestRef.current) return;
+      if (page.first) {
+        // The listing proper starts here, so the previous directory's rows are
+        // replaced. Selected paths that vanished are pruned by the
+        // `visibleEntries` effect rather than here, because a refresh can run
+        // for the side that isn't on screen — an upload refreshes the remote
+        // listing while the local one is showing — and that must not touch the
+        // visible selection.
+        setEntries(page.entries);
+        setSession((prev) =>
+          prev && prev.sessionId === page.session_id
+            ? { ...prev, cwd: page.cwd }
+            : prev,
+        );
+        // Rows are real now, so drop the mask over the old listing.
+        setLoading(false);
+      } else if (page.entries.length) {
+        setEntries((prev) => appendEntries(prev, page.entries));
+      }
+      setStreaming(!page.done);
+    })
+      .then((fn) => {
+        // StrictMode mounts the effect twice; the first subscription is
+        // already obsolete by the time it resolves.
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      .catch((e) => setError(String(e)));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
   const refreshAt = useCallback(
     async (sessionId: string, path: string) => {
+      const requestId = ++listRequestRef.current;
       setLoading(true);
       setError(null);
+      setStreaming(false);
       try {
-        const result = await ftpApi.list(sessionId, path);
-        setEntries(result.entries);
-        // Selected paths that vanished (moved, deleted, or changed by another
-        // client) are pruned by the `visibleEntries` effect. It's kept there
-        // rather than here because a refresh can run for the side that isn't
-        // on screen — an upload refreshes the remote listing while the local
-        // one is showing — and that must not touch the visible selection.
-        setSession((prev) =>
-          prev ? { ...prev, cwd: result.cwd || path } : prev,
-        );
+        // Resolves when the folder has been read to the end; the rows it
+        // produced are already on screen via the listener.
+        const cwd = await ftpApi.list(sessionId, path, requestId);
+        setSession((prev) => (prev ? { ...prev, cwd: cwd || path } : prev));
       } catch (e) {
         setError(String(e));
       } finally {
         setLoading(false);
+        setStreaming(false);
       }
     },
     [],
@@ -657,6 +719,11 @@ export default function App() {
     } catch (e) {
       setError(String(e));
     } finally {
+      // Retire any listing still streaming so its pages can't refill the pane
+      // we just emptied.
+      listRequestRef.current += 1;
+      setStreaming(false);
+      setLoading(false);
       setSession(null);
       setEntries([]);
       setFilter("");
@@ -2095,6 +2162,15 @@ export default function App() {
                   <Loader2 size={14} className="spin" />
                   <span>Loading…</span>
                 </div>
+              </div>
+            )}
+            {/* A remote folder streams in while the server reads it. The rows
+                already on screen are real, so this counts up beside them
+                instead of covering them. */}
+            {!isLocal && streaming && (
+              <div className="list-progress" aria-live="polite">
+                <Loader2 size={12} className="spin" />
+                <span>{entries.length} loaded…</span>
               </div>
             )}
           </div>

@@ -139,10 +139,11 @@ pub async fn delete_remote(
     is_dir: bool,
 ) -> FtpResult<()> {
     with_session!(state, session_id, |s| {
-        match s.conn_mut() {
+        let (conn, cwd) = s.parts_mut();
+        match conn {
             Connection::Ftp(stream) => {
                 if is_dir {
-                    delete_dir_recursive_ftp(stream, remote_path).await
+                    delete_dir_recursive_ftp(stream, cwd, remote_path).await
                 } else {
                     stream.rm(remote_path).await.map_err(FtpError::from)
                 }
@@ -162,25 +163,28 @@ pub async fn delete_remote(
 /// which async recursion requires.
 fn delete_dir_recursive_ftp<'a>(
     stream: &'a mut suppaftp::tokio::AsyncFtpStream,
+    cwd: &'a mut String,
     path: &'a str,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = FtpResult<()>> + Send + 'a>> {
     Box::pin(async move {
         // Walk into the dir, list its contents, then remove children and the
         // dir itself. Using the CWD-then-LIST pattern matches list_dir_ftp;
         // some servers reject `LIST <path>` directly.
-        stream.cwd(path).await?;
-        let pwd = stream.pwd().await.unwrap_or_else(|_| path.to_string());
+        let target = crate::ftp::normalized_dir(path);
+        stream.cwd(&target).await?;
+        // The CWD says where we are; a PWD would only ask the same question.
+        *cwd = target.clone();
         let lines = stream.list(None).await?;
 
         let entries: Vec<crate::ftp::FileEntry> = lines
             .iter()
-            .filter_map(|l| crate::ftp::parse_ftp_line(l, &pwd))
+            .filter_map(|l| crate::ftp::parse_ftp_line(l, &target))
             .filter(|e| e.name != "." && e.name != "..")
             .collect();
 
         // Delete plain files first; recursing into subdirs afterwards leaves
-        // the state predictable (we're back at `pwd` when the recursive call
-        // returns, because it CDs to its own parent before rmdir'ing itself).
+        // the state predictable (the recursive call ends back in its own
+        // parent before rmdir'ing the dir it was given).
         for entry in &entries {
             if !entry.is_dir {
                 stream.rm(&entry.path).await?;
@@ -188,17 +192,18 @@ fn delete_dir_recursive_ftp<'a>(
         }
         for entry in &entries {
             if entry.is_dir {
-                delete_dir_recursive_ftp(stream, &entry.path).await?;
+                delete_dir_recursive_ftp(stream, cwd, &entry.path).await?;
             }
         }
 
         // Must not be sitting inside the dir we're about to remove.
-        let parent = pwd
+        let parent = target
             .rsplit_once('/')
             .map(|(p, _)| if p.is_empty() { "/" } else { p })
             .unwrap_or("/");
         stream.cwd(parent).await?;
-        stream.rmdir(&pwd).await?;
+        *cwd = parent.to_string();
+        stream.rmdir(&target).await?;
         Ok(())
     })
 }
@@ -241,8 +246,9 @@ pub async fn remote_exists(
     remote_path: &str,
 ) -> FtpResult<ExistsResult> {
     with_session!(state, session_id, |s| {
-        match s.conn_mut() {
-            Connection::Ftp(stream) => exists_ftp(stream, remote_path).await,
+        let (conn, cwd) = s.parts_mut();
+        match conn {
+            Connection::Ftp(stream) => exists_ftp(stream, cwd, remote_path).await,
             Connection::Sftp(holder) => {
                 let found = crate::sftp::stat(holder, remote_path).await?;
                 Ok(ExistsResult {
@@ -260,6 +266,7 @@ pub async fn remote_exists(
 /// LIST does, which is everywhere this app already relies on.
 async fn exists_ftp(
     stream: &mut suppaftp::tokio::AsyncFtpStream,
+    cwd: &mut String,
     remote_path: &str,
 ) -> FtpResult<ExistsResult> {
     let (parent, name) = split_remote(remote_path);
@@ -270,12 +277,18 @@ async fn exists_ftp(
             is_dir: true,
         });
     }
-    stream.cwd(&parent).await?;
-    let pwd = stream.pwd().await.unwrap_or(parent);
+    // `split_remote` already gives a canonical, slash-trimmed directory, so it
+    // compares cleanly against the session's record. This helper runs right
+    // before a listing-driven paste flow, and leaving the server inside the
+    // parent is exactly where that listing wants to be.
+    if cwd.as_str() != parent.as_str() {
+        stream.cwd(&parent).await?;
+        *cwd = parent.clone();
+    }
     let lines = stream.list(None).await?;
     for entry in lines
         .iter()
-        .filter_map(|l| crate::ftp::parse_ftp_line(l, &pwd))
+        .filter_map(|l| crate::ftp::parse_ftp_line(l, &parent))
     {
         if entry.name == name {
             return Ok(ExistsResult {
@@ -370,7 +383,8 @@ pub async fn copy_remote(
     is_dir: bool,
 ) -> FtpResult<()> {
     with_session!(state, session_id, |s| {
-        match s.conn_mut() {
+        let (conn, cwd) = s.parts_mut();
+        match conn {
             Connection::Ftp(stream) => {
                 async {
                     // One scratch dir per copy operation, removed when we're
@@ -381,7 +395,7 @@ pub async fn copy_remote(
                     tokio::fs::create_dir_all(&tmp).await.map_err(io_err)?;
 
                     let result = if is_dir {
-                        copy_dir_recursive_ftp(stream, from, to, &tmp).await
+                        copy_dir_recursive_ftp(stream, cwd, from, to, &tmp).await
                     } else {
                         copy_file_ftp(stream, from, to, &tmp).await
                     };
@@ -419,6 +433,7 @@ async fn copy_file_ftp(
 /// `LIST <path>`. Boxed so the future is `Sized` for async recursion.
 fn copy_dir_recursive_ftp<'a>(
     stream: &'a mut suppaftp::tokio::AsyncFtpStream,
+    cwd: &'a mut String,
     from: &'a str,
     to: &'a str,
     tmp_dir: &'a Path,
@@ -428,20 +443,23 @@ fn copy_dir_recursive_ftp<'a>(
         // which is what the user asked for by confirming the overwrite.
         let _ = stream.mkdir(to).await;
 
-        stream.cwd(from).await?;
-        let pwd = stream.pwd().await.unwrap_or_else(|_| from.to_string());
+        let target = crate::ftp::normalized_dir(from);
+        if cwd.as_str() != target.as_str() {
+            stream.cwd(&target).await?;
+            *cwd = target.clone();
+        }
         let lines = stream.list(None).await?;
 
         let entries: Vec<crate::ftp::FileEntry> = lines
             .iter()
-            .filter_map(|l| crate::ftp::parse_ftp_line(l, &pwd))
+            .filter_map(|l| crate::ftp::parse_ftp_line(l, &target))
             .filter(|e| e.name != "." && e.name != "..")
             .collect();
 
         for entry in &entries {
             let dest = join_remote(to, &entry.name);
             if entry.is_dir {
-                copy_dir_recursive_ftp(stream, &entry.path, &dest, tmp_dir).await?;
+                copy_dir_recursive_ftp(stream, cwd, &entry.path, &dest, tmp_dir).await?;
             } else {
                 copy_file_ftp(stream, &entry.path, &dest, tmp_dir).await?;
             }

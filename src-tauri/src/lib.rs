@@ -5,7 +5,7 @@ mod transfer;
 
 use tauri::{Manager, State};
 
-use crate::ftp::{ConnectRequest, ConnectResult, FtpResult, FtpState, ListResult};
+use crate::ftp::{ConnectRequest, ConnectResult, FtpResult, FtpState};
 use crate::local::{LocalListResult, LocalResult};
 use crate::transfer::{ExistsResult, ReadTextResult};
 
@@ -22,13 +22,19 @@ async fn ftp_disconnect(state: State<'_, FtpState>, session_id: String) -> FtpRe
     ftp::disconnect(state.inner(), &session_id).await
 }
 
+/// Start a directory listing. Pages of entries reach the UI through the
+/// `remote-list-page` event; this resolves with the canonical directory once
+/// the folder has been read to the end. `request_id` is chosen by the frontend
+/// and echoed on every page so pages of a superseded navigation can be
+/// discarded.
 #[tauri::command]
 async fn ftp_list(
     state: State<'_, FtpState>,
     session_id: String,
     path: String,
-) -> FtpResult<ListResult> {
-    ftp::list_dir(state.inner(), &session_id, &path).await
+    request_id: u32,
+) -> FtpResult<String> {
+    ftp::list_dir(state.inner(), &session_id, &path, request_id).await
 }
 
 #[tauri::command]

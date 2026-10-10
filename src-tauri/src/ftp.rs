@@ -36,11 +36,35 @@ pub const EVENT_RECONNECTING: &str = "session-reconnecting";
 pub const EVENT_RECONNECTED: &str = "session-reconnected";
 pub const EVENT_RECONNECT_FAILED: &str = "session-reconnect-failed";
 
+/// One page of a remote directory listing, pushed the moment the server hands
+/// it over rather than when the whole folder has arrived. SFTP answers a
+/// large directory ~100 entries at a time, so the first rows can be on screen
+/// seconds before the last one exists.
+pub const EVENT_LIST_PAGE: &str = "remote-list-page";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ReconnectEvent {
     pub session_id: String,
     /// Why the reconnect failed. Only set on [`EVENT_RECONNECT_FAILED`].
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ListPageEvent {
+    pub session_id: String,
+    /// Echoed back from the `ftp_list` call that started this listing. The UI
+    /// starts a new one on every navigation, so this is how pages from a
+    /// folder the user has already left get dropped instead of merged in.
+    pub request_id: u32,
+    /// Canonical directory the page belongs to.
+    pub cwd: String,
+    pub entries: Vec<FileEntry>,
+    /// First page of this listing: the UI replaces what it shows instead of
+    /// appending. An empty folder has no page, so its completion marker
+    /// carries this too.
+    pub first: bool,
+    /// Nothing more is coming for this `request_id`.
+    pub done: bool,
 }
 
 /// Session pool. Each entry is keyed by a server-generated UUID handed back
@@ -71,6 +95,15 @@ impl FtpState {
                     error,
                 },
             );
+        }
+    }
+
+    /// Push an arbitrary payload to the frontend. `attach` happens during
+    /// `setup`, so there is no window in which a caller has somewhere to emit
+    /// to and no `AppHandle` yet.
+    fn emit_value(&self, event: &str, payload: impl Serialize + Clone) {
+        if let Some(app) = self.app.get() {
+            let _ = app.emit(event, payload);
         }
     }
 }
@@ -114,6 +147,14 @@ impl Session {
 
     pub fn conn_mut(&mut self) -> &mut Connection {
         &mut self.conn
+    }
+
+    /// The connection and the remembered working directory together. FTP has no
+    /// way to name a directory per command — every operation moves the server's
+    /// one current directory — so a helper that issues a CWD has to update the
+    /// record in the same pass, or the next listing would skip a CWD it needs.
+    pub fn parts_mut(&mut self) -> (&mut Connection, &mut String) {
+        (&mut self.conn, &mut self.cwd)
     }
 
     pub fn touch(&mut self) {
@@ -435,17 +476,83 @@ pub async fn disconnect(state: &FtpState, session_id: &str) -> FtpResult<()> {
     Ok(())
 }
 
-pub async fn list_dir(state: &FtpState, session_id: &str, path: &str) -> FtpResult<ListResult> {
+/// Start a directory listing, pushing every page the server produces to the UI
+/// as `EVENT_LIST_PAGE` events.
+///
+/// Resolves with the canonical directory once the folder has been read to the
+/// end, and deliberately carries no entries: the rows are already on their way
+/// over the event channel, and shipping a five-figure directory a second time
+/// to satisfy one `await` would be the most expensive part of the operation.
+///
+/// `request_id` is chosen by the frontend and echoed on every page, so pages
+/// of a navigation the user has already left can be discarded as they land.
+pub async fn list_dir(
+    state: &FtpState,
+    session_id: &str,
+    path: &str,
+    request_id: u32,
+) -> FtpResult<String> {
     with_session!(state, session_id, |s| {
-        let result = match s.conn_mut() {
-            Connection::Ftp(stream) => list_dir_ftp(stream, path).await,
-            Connection::Sftp(holder) => sftp::list_dir(holder, path).await,
-        };
-        if let Ok(listing) = &result {
-            s.remember_cwd(&listing.cwd);
-        }
-        result
+        list_pages(state, s, session_id, path, request_id).await
     })
+}
+
+/// Read one folder, handing every page to the UI as the server produces it.
+///
+/// A separate function rather than inline in [`list_dir`]'s `with_session!`
+/// body: that macro expands its body twice — once to run it, once to replay it
+/// after repairing a dead link — and the second expansion sits in a match arm,
+/// which leaves the `?` in here with nothing to infer its error type from.
+async fn list_pages(
+    state: &FtpState,
+    s: &mut Session,
+    session_id: &str,
+    path: &str,
+    request_id: u32,
+) -> FtpResult<String> {
+    let mut pages = 0u32;
+    let mut send = |page_cwd: &str, batch: Vec<FileEntry>| {
+        state.emit_value(
+            EVENT_LIST_PAGE,
+            ListPageEvent {
+                session_id: session_id.to_string(),
+                request_id,
+                cwd: page_cwd.to_string(),
+                first: pages == 0,
+                // The completion marker is sent separately, so a page never
+                // has to be both.
+                done: false,
+                entries: batch,
+            },
+        );
+        pages += 1;
+    };
+    let (conn, session_cwd) = s.parts_mut();
+    let landed = match conn {
+        Connection::Ftp(stream) => {
+            // FTP's LIST is a single data transfer, so the whole folder
+            // genuinely arrives at once — one page.
+            let listing = list_dir_ftp(stream, session_cwd, path).await?;
+            send(&listing.cwd, listing.entries);
+            listing.cwd
+        }
+        Connection::Sftp(holder) => sftp::list_dir_stream(holder, path, &mut send).await?,
+    };
+    s.remember_cwd(&landed);
+    state.emit_value(
+        EVENT_LIST_PAGE,
+        ListPageEvent {
+            session_id: session_id.to_string(),
+            request_id,
+            cwd: landed.clone(),
+            entries: Vec::new(),
+            // A folder with nothing in it never had a page, so this marker is
+            // the UI's "here is the listing" as well as "it's over".
+            first: pages == 0,
+            done: true,
+        },
+    );
+    Ok(landed)
 }
 
 pub async fn change_dir(state: &FtpState, session_id: &str, path: &str) -> FtpResult<String> {
@@ -494,15 +601,35 @@ async fn dial_ftp(req: &ConnectRequest) -> FtpResult<(Connection, String, String
     Ok((Connection::Ftp(stream), cwd, welcome))
 }
 
-async fn list_dir_ftp(stream: &mut AsyncFtpStream, path: &str) -> FtpResult<ListResult> {
+async fn list_dir_ftp(
+    stream: &mut AsyncFtpStream,
+    cwd: &mut String,
+    path: &str,
+) -> FtpResult<ListResult> {
     // Some servers reject `LIST <path>` when the path doesn't exist or contains
     // spaces, so CWD into the target first and then issue LIST with no arg.
-    if !path.is_empty() {
-        stream.cwd(path).await?;
-    }
-    // PWD may fail (or return a non-UTF-8 body) on quirky servers — fall back
-    // to the requested path so the row "Open" still produces something useful.
-    let actual = stream.pwd().await.unwrap_or_else(|_| path.to_string());
+    //
+    // That used to cost three control round trips (CWD, PWD, then LIST's own
+    // exchange). Two of them are usually free to skip: the session records
+    // where the server actually is — every FTP helper that moves updates that
+    // record — so an equal path means we're already there, and the path we
+    // asked for doubles as the canonical one, because every follow-up command
+    // (RETR, DELE, the next CWD) is addressed by it anyway. PWD would only
+    // echo back what both sides already know.
+    let actual = if path.is_empty() {
+        // Nothing was requested, so there is nothing to compare against: ask.
+        stream.pwd().await.unwrap_or_else(|_| "/".to_string())
+    } else {
+        let target = normalized_dir(path);
+        if cwd.as_str() != target.as_str() {
+            stream.cwd(&target).await?;
+            // Recorded the moment the server accepts it. A CWD that fails
+            // leaves the server where it was, so this never claims a
+            // directory we didn't enter.
+            *cwd = target.clone();
+        }
+        target
+    };
     let raw_lines = stream.list(None).await?;
 
     let mut entries: Vec<FileEntry> = raw_lines
@@ -555,6 +682,18 @@ pub(crate) fn parse_ftp_line(line: &str, cwd: &str) -> Option<FileEntry> {
         modified: Some(modified.to_rfc3339()),
         permissions: Some(format_permissions(&file)),
     })
+}
+
+/// Directory form of a remote path, for comparing against the session's
+/// remembered one. A trailing slash is the only difference the server ignores
+/// but a string comparison wouldn't, so both sides are put in the same form.
+pub(crate) fn normalized_dir(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn join_path(cwd: &str, name: &str) -> String {
