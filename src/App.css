@@ -14,8 +14,25 @@
   --danger: #e5534b;
   --success: #3fb950;
   --shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
-  --radius: 10px;
-  --radius-sm: 6px;
+  --radius: 12px;
+  --radius-sm: 8px;
+
+  /* ---------- Glass mimicry tokens (Apple Liquid Glass flavored) ----------
+     Panels are translucent veils floating over the page gradient; depth
+     comes from blur + a light hairline, not from heavy shadows. Single
+     accent (blue) stays the only "click me" signal. */
+  --glass-panel: rgba(21, 26, 33, 0.66);
+  --glass-panel-strong: rgba(21, 26, 33, 0.82);
+  --glass-chip: rgba(255, 255, 255, 0.05);
+  --glass-chip-hover: rgba(255, 255, 255, 0.09);
+  --glass-hairline: rgba(255, 255, 255, 0.10);
+  --glass-hairline-strong: rgba(255, 255, 255, 0.16);
+  --glass-blur: 18px;
+  --glass-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  --page-bg:
+    radial-gradient(1200px 700px at 12% -8%, rgba(74, 141, 239, 0.20), transparent 60%),
+    radial-gradient(1000px 640px at 92% 108%, rgba(47, 111, 237, 0.14), transparent 60%),
+    #0e1116;
 }
 
 @media (prefers-color-scheme: light) {
@@ -33,6 +50,18 @@
     --accent-strong: #1f5fdf;
     --accent-soft: #dde8ff;
     --shadow: 0 12px 28px rgba(0, 0, 0, 0.12);
+
+    --glass-panel: rgba(255, 255, 255, 0.62);
+    --glass-panel-strong: rgba(255, 255, 255, 0.80);
+    --glass-chip: rgba(15, 23, 42, 0.04);
+    --glass-chip-hover: rgba(15, 23, 42, 0.07);
+    --glass-hairline: rgba(15, 23, 42, 0.10);
+    --glass-hairline-strong: rgba(15, 23, 42, 0.16);
+    --glass-shadow: 0 8px 24px rgba(15, 23, 42, 0.10);
+    --page-bg:
+      radial-gradient(1200px 700px at 12% -8%, rgba(47, 111, 237, 0.14), transparent 60%),
+      radial-gradient(1000px 640px at 92% 108%, rgba(47, 111, 237, 0.10), transparent 60%),
+      #f2f4f8;
   }
 }
 
@@ -53,10 +82,14 @@ body {
   font-size: 13px;
   line-height: 1.5;
   color: var(--text);
-  background: var(--bg);
+  background: var(--page-bg);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
+
+/* Frosted-veil recipe, repeated on every floating surface (sidebar,
+   toolbar, menus, modals, toasts): translucent fill + saturate/blur + a
+   light hairline. Depth comes from the glass, not from heavy shadows. */
 
 button {
   font: inherit;
@@ -88,14 +121,18 @@ input {
      and leak height into the sidebar's flex computation. */
   min-height: 0;
   overflow: hidden;
-  background: var(--bg);
+  /* Transparent so the page glow shows through the gaps between the
+     frosted panels. */
+  background: transparent;
 }
 
 /* ---------- Sidebar ---------- */
 
 .sidebar {
-  background: var(--bg-soft);
-  border-right: 1px solid var(--border);
+  background: var(--glass-panel);
+  backdrop-filter: saturate(160%) blur(var(--glass-blur));
+  -webkit-backdrop-filter: saturate(160%) blur(var(--glass-blur));
+  border-right: 1px solid var(--glass-hairline);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -116,7 +153,7 @@ input {
   align-items: center;
   justify-content: space-between;
   padding: 14px 14px 10px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--glass-hairline);
 }
 
 .brand {
@@ -124,7 +161,9 @@ input {
   align-items: center;
   gap: 8px;
   font-weight: 600;
-  letter-spacing: 0.2px;
+  /* The signature "Apple tight" cadence on the one bit of chrome type the
+     app shows at display weight. */
+  letter-spacing: -0.2px;
   color: var(--text);
 }
 
@@ -151,13 +190,13 @@ input {
   min-height: 0;
 }
 
-/* The pinned local card: a fixed one-row list above the scrolling one, with a
-   rule under it so the two groups read as separate. */
+/* The pinned local card: a fixed one-row list above the scrolling one, with
+   a frosted hairline under it so the two groups read as separate. */
 .connection-list.pinned {
   flex: 0 0 auto;
   overflow: visible;
   padding-bottom: 8px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--glass-hairline);
 }
 
 .empty-hint {
@@ -166,20 +205,34 @@ input {
   font-size: 12px;
 }
 
+/* Connection cards as little glass tiles: translucent chip fill, hairline
+   ring, and the active state marked by an accent rail instead of a solid
+   block of color. */
 .connection-item {
   display: flex;
   align-items: stretch;
   border-radius: var(--radius-sm);
-  margin-bottom: 4px;
-  transition: background 120ms ease;
+  margin-bottom: 6px;
+  background: var(--glass-chip);
+  border: 1px solid transparent;
+  transition: background 120ms ease, border-color 120ms ease,
+    transform 120ms ease;
 }
 
 .connection-item:hover {
-  background: var(--bg-hover);
+  background: var(--glass-chip-hover);
+  border-color: var(--glass-hairline);
+}
+
+.connection-item:active {
+  /* Apple's system-wide press micro-interaction. */
+  transform: scale(0.98);
 }
 
 .connection-item.active {
-  background: var(--accent-soft);
+  background: color-mix(in srgb, var(--accent) 14%, var(--glass-chip));
+  border-color: color-mix(in srgb, var(--accent) 38%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .connection-main {
@@ -275,8 +328,12 @@ input {
 }
 
 .icon-btn:hover {
-  background: var(--bg-hover);
+  background: var(--glass-chip-hover);
   color: var(--text);
+}
+
+.icon-btn:active {
+  transform: scale(0.92);
 }
 
 .icon-btn:disabled {
@@ -300,21 +357,30 @@ input {
   gap: 6px;
   padding: 7px 14px;
   border-radius: var(--radius-sm);
-  border: 1px solid var(--border-strong);
-  background: var(--bg-elevated);
+  border: 1px solid var(--glass-hairline-strong);
+  background: var(--glass-chip);
   color: var(--text);
   cursor: pointer;
-  transition: background 120ms ease, border-color 120ms ease;
+  transition: background 120ms ease, border-color 120ms ease,
+    transform 120ms ease;
 }
 
 .btn:hover {
-  background: var(--bg-hover);
+  background: var(--glass-chip-hover);
+}
+
+.btn:active {
+  /* Apple's press grammar: shrink, don't darken. */
+  transform: scale(0.95);
 }
 
 .btn.primary {
+  /* The signature action pill — full radius, single blue. */
   background: var(--accent);
   border-color: var(--accent);
+  border-radius: 9999px;
   color: white;
+  padding: 7px 18px;
 }
 
 .btn.primary:hover {
@@ -323,6 +389,7 @@ input {
 
 .btn.ghost {
   background: transparent;
+  border-color: transparent;
 }
 
 /* ---------- Toolbar / breadcrumb ---------- */
@@ -333,8 +400,10 @@ input {
   justify-content: space-between;
   gap: 12px;
   padding: 10px 16px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-soft);
+  border-bottom: 1px solid var(--glass-hairline);
+  background: var(--glass-panel);
+  backdrop-filter: saturate(160%) blur(var(--glass-blur));
+  -webkit-backdrop-filter: saturate(160%) blur(var(--glass-blur));
   min-height: 48px;
 }
 
@@ -348,9 +417,20 @@ input {
 }
 
 /* Breadcrumb yields space to the selection badge rather than pushing it out
-   of the (overflow: hidden) toolbar on a deep path. */
+   of the (overflow: hidden) toolbar on a deep path. A single scrolling line
+   beats wrapping onto the file list. */
 .toolbar-left .breadcrumb {
   min-width: 0;
+}
+
+/* Thin vertical hairline grouping the toolbar's action clusters
+   (create/view | refresh). */
+.toolbar-sep {
+  width: 1px;
+  height: 20px;
+  margin: 0 6px;
+  background: var(--glass-hairline-strong);
+  flex-shrink: 0;
 }
 
 /* How many rows are selected. Only shown for real multi-selections, so it
@@ -380,10 +460,19 @@ input {
 .breadcrumb {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 2px;
   font-size: 12px;
   color: var(--text-muted);
+  overflow-x: auto;
+  /* When a deep path overflows, the *front* of the toolbar is the part
+     users expect to keep (root crumbs), so scroll from the tail edge. */
+  direction: rtl;
+  scrollbar-width: none;
+}
+
+.breadcrumb::-webkit-scrollbar {
+  display: none;
 }
 
 .crumb {
@@ -396,16 +485,19 @@ input {
   border-radius: 5px;
   cursor: pointer;
   color: var(--text-muted);
+  white-space: nowrap;
 }
 
 .crumb:hover {
-  background: var(--bg-hover);
+  background: var(--glass-chip-hover);
   color: var(--text);
 }
 
 .crumb.current {
   color: var(--text);
-  font-weight: 500;
+  font-weight: 600;
+  /* Display-weight text earns the negative tracking, even at 12px here. */
+  letter-spacing: -0.1px;
 }
 
 .crumb.root {
@@ -429,9 +521,11 @@ input {
   align-items: center;
   gap: 8px;
   padding: 6px 12px;
-  background: var(--bg-soft);
+  background: var(--glass-panel-strong);
+  backdrop-filter: saturate(160%) blur(var(--glass-blur));
+  -webkit-backdrop-filter: saturate(160%) blur(var(--glass-blur));
   /* Anchored to the bottom of the right pane, so the divider sits on top. */
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--glass-hairline);
   flex-shrink: 0;
 }
 
@@ -478,14 +572,18 @@ input {
   top: 0;
   z-index: 1;
   text-align: left;
-  font-weight: 500;
+  font-weight: 600;
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-dim);
-  background: var(--bg);
+  /* Frosted sticky header: rows scrolling underneath blur through the
+     glass instead of sliding past an opaque wall. */
+  background: var(--glass-panel-strong);
+  backdrop-filter: saturate(160%) blur(var(--glass-blur));
+  -webkit-backdrop-filter: saturate(160%) blur(var(--glass-blur));
   padding: 8px 12px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--glass-hairline);
 }
 
 /* Sortable-header button. Sits inside a <th> and inherits the header's
@@ -657,9 +755,9 @@ input {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: color-mix(in srgb, var(--bg) 55%, transparent);
-  backdrop-filter: blur(1.5px);
-  -webkit-backdrop-filter: blur(1.5px);
+  background: color-mix(in srgb, var(--bg) 30%, transparent);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
   pointer-events: auto;
   animation: overlay-in 120ms ease-out;
 }
@@ -677,11 +775,13 @@ input {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 12px;
+  padding: 7px 14px;
   border-radius: 999px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  background: var(--glass-panel-strong);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  border: 1px solid var(--glass-hairline-strong);
+  box-shadow: var(--glass-shadow);
   font-size: 12px;
   color: var(--text);
 }
@@ -739,13 +839,15 @@ input {
   align-items: center;
   gap: 8px;
   padding: 7px 8px 7px 10px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--bg-elevated);
+  border-radius: 10px;
+  border: 1px solid var(--glass-hairline-strong);
+  background: var(--glass-panel-strong);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
   color: var(--text);
   /* A whisper-quiet shadow — enough to lift the toast off the file rows,
      not enough to feel like a heavy card. */
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--glass-shadow);
   font-size: 12px;
   line-height: 1.4;
   /* Hidden by default so the enter transition plays when the parent adds
@@ -816,7 +918,9 @@ input {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.45);
+  background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -835,10 +939,12 @@ input {
 
 .modal {
   width: min(440px, 92vw);
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-strong);
+  background: var(--glass-panel-strong);
+  backdrop-filter: saturate(180%) blur(24px);
+  -webkit-backdrop-filter: saturate(180%) blur(24px);
+  border: 1px solid var(--glass-hairline-strong);
   border-radius: var(--radius);
-  box-shadow: var(--shadow);
+  box-shadow: var(--glass-shadow);
   overflow: hidden;
 }
 
@@ -847,13 +953,14 @@ input {
   align-items: center;
   justify-content: space-between;
   padding: 14px 16px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--glass-hairline);
 }
 
 .modal-header h2 {
   margin: 0;
   font-size: 14px;
   font-weight: 600;
+  letter-spacing: -0.1px;
 }
 
 .form {
@@ -885,8 +992,8 @@ input {
 }
 
 .form input {
-  background: var(--bg);
-  border: 1px solid var(--border-strong);
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  border: 1px solid var(--glass-hairline-strong);
   border-radius: var(--radius-sm);
   padding: 7px 10px;
   color: var(--text);
@@ -896,7 +1003,7 @@ input {
 
 .form input:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-soft);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
 /* Locked while a submit is in flight (see PromptDialog). */
@@ -922,7 +1029,7 @@ input {
 /* Segmented control used as a protocol toggle (FTP / SFTP). */
 .segmented {
   display: inline-flex;
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--glass-hairline-strong);
   border-radius: var(--radius-sm);
   overflow: hidden;
   width: fit-content;
@@ -930,7 +1037,7 @@ input {
 
 .segmented button {
   appearance: none;
-  background: var(--bg);
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
   color: var(--text);
   border: 0;
   padding: 6px 14px;
@@ -940,11 +1047,11 @@ input {
 }
 
 .segmented button + button {
-  border-left: 1px solid var(--border-strong);
+  border-left: 1px solid var(--glass-hairline-strong);
 }
 
 .segmented button:hover {
-  background: var(--bg-hover);
+  background: var(--glass-chip-hover);
 }
 
 .segmented button.active {
@@ -1004,10 +1111,12 @@ input {
   position: fixed;
   z-index: 1000;
   min-width: 200px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-strong);
+  background: var(--glass-panel-strong);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  border: 1px solid var(--glass-hairline-strong);
   border-radius: var(--radius-sm);
-  box-shadow: var(--shadow);
+  box-shadow: var(--glass-shadow);
   padding: 4px;
   display: flex;
   flex-direction: column;
@@ -1020,14 +1129,14 @@ input {
   background: transparent;
   border: none;
   padding: 7px 10px;
-  border-radius: 4px;
+  border-radius: 5px;
   color: var(--text);
   cursor: pointer;
   font-size: 12px;
 }
 
 .context-menu-item:hover:not(:disabled) {
-  background: var(--bg-hover);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
 .context-menu-item:disabled {
@@ -1039,7 +1148,7 @@ input {
 .context-menu-sep {
   height: 1px;
   margin: 4px 6px;
-  background: var(--border);
+  background: var(--glass-hairline-strong);
 }
 
 
@@ -1072,7 +1181,7 @@ input {
 }
 
 .icon-btn.active {
-  background: var(--accent-soft);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
   color: var(--accent);
 }
 
@@ -1083,8 +1192,8 @@ input {
      owned by the textarea; the gutter follows it from JS. */
   display: flex;
   overflow: hidden;
-  background: var(--bg);
-  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg) 45%, transparent);
+  border-top: 1px solid var(--glass-hairline);
 }
 
 /* Line numbers. Typography must match .text-viewer-area exactly (family,
@@ -1167,8 +1276,8 @@ input {
   flex-direction: column;
   gap: 6px;
   padding: 8px 12px;
-  background: var(--bg-soft);
-  border-top: 1px solid var(--border);
+  background: var(--glass-panel);
+  border-top: 1px solid var(--glass-hairline);
   flex-shrink: 0;
 }
 
@@ -1187,9 +1296,9 @@ input {
   flex: 1;
   min-width: 0;
   padding: 5px 8px;
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--glass-hairline-strong);
   border-radius: var(--radius-sm);
-  background: var(--bg);
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
   color: var(--text);
   font-size: 12.5px;
   outline: none;
@@ -1197,7 +1306,7 @@ input {
 
 .find-input:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-soft);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
 .find-input::placeholder {

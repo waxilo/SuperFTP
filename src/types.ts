@@ -30,4 +30,8 @@ export interface FileEntry {
   is_symlink: boolean;
   modified: string | null;
   permissions: string | null;
+  /** Local listings only: dot-prefixed, or Windows hidden attribute. The
+   *  "Show hidden files" toggle filters on it client-side; remote entries
+   *  leave it unset (servers already decided what to list). */
+  is_hidden?: boolean;
 }

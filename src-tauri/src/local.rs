@@ -1,16 +1,17 @@
-//! Local-filesystem browsing for the sidebar's "Local" panel and as the
-//! destination side of the remote → local "Send" action.
+//! Local-filesystem browsing for the main pane and as the destination side
+//! of the remote → local "Send" action.
 //!
-//! Only the operations the UI actually needs are exposed: list a directory
-//! and resolve the user's home directory. Heavy lifting (file transfers) is
-//! handled by `transfer.rs`.
+//! Mirrors the remote-side command surface (list, mkdir, create file,
+//! rename, copy, delete, exists) so the context menu works identically on
+//! either side. Heavy lifting (network transfers) is handled by
+//! `transfer.rs`.
 
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::transfer::ReadTextResult;
+use crate::transfer::{ExistsResult, ReadTextResult};
 
 #[derive(thiserror::Error, Debug)]
 pub enum LocalError {
@@ -46,6 +47,10 @@ pub struct LocalEntry {
     pub is_dir: bool,
     pub size: u64,
     pub modified: Option<String>,
+    /// Dot-prefixed on every platform; additionally FILE_ATTRIBUTE_HIDDEN on
+    /// Windows. Reported rather than filtered out — the UI owns whether
+    /// hidden entries are displayed via its "Show hidden files" toggle.
+    pub is_hidden: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -63,9 +68,23 @@ pub fn home_dir() -> String {
     normalize_path(&path)
 }
 
-/// List the contents of `path`. Hides hidden files (dot-prefixed) — they
-/// clutter the sidebar and the user can still navigate into them by typing
-/// the full path elsewhere.
+/// Windows hides files two ways: a dot prefix (Unix convention) and the
+/// FILE_ATTRIBUTE_HIDDEN bit (what Explorer's "Hidden" checkbox sets).
+/// Entries matching either are reported `is_hidden` and filtered by the UI.
+#[cfg(windows)]
+fn is_hidden(name: &str, meta: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    name.starts_with('.') || (meta.file_attributes() & FILE_ATTRIBUTE_HIDDEN) != 0
+}
+
+#[cfg(not(windows))]
+fn is_hidden(name: &str, _meta: &std::fs::Metadata) -> bool {
+    name.starts_with('.')
+}
+
+/// List the contents of `path`. Hidden entries are included and flagged
+/// (`is_hidden`); the frontend decides whether to show them.
 pub fn list_dir(path: &str) -> LocalResult<LocalListResult> {
     let p = PathBuf::from(path);
     if !p.exists() {
@@ -78,9 +97,6 @@ pub fn list_dir(path: &str) -> LocalResult<LocalListResult> {
     for entry in std::fs::read_dir(&canon)? {
         let Ok(entry) = entry else { continue };
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') {
-            continue;
-        }
 
         // `metadata` can fail for symlinks pointing at nothing or items the
         // user has no read permission on; skip those rather than failing the
@@ -96,12 +112,14 @@ pub fn list_dir(path: &str) -> LocalResult<LocalListResult> {
             });
 
         let abs = entry.path();
+        let hidden = is_hidden(&name, &meta);
         entries.push(LocalEntry {
             name,
             path: normalize_path(&abs),
             is_dir: meta.is_dir(),
             size: if meta.is_dir() { 0 } else { meta.len() },
             modified,
+            is_hidden: hidden,
         });
     }
 
@@ -165,6 +183,62 @@ pub fn delete_path(path: &str) -> LocalResult<()> {
         std::fs::remove_file(&p)?;
     }
     Ok(())
+}
+
+/// Create a single local directory. Fails if the path is already taken or
+/// its parent doesn't exist — same strictness as the remote `mkdir`.
+pub fn make_dir(path: &str) -> LocalResult<()> {
+    std::fs::create_dir(path)?;
+    Ok(())
+}
+
+/// Create an empty local file, refusing to touch an existing one
+/// (`create_new`) so a typo'd name can't truncate real data.
+pub fn make_file(path: &str) -> LocalResult<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    Ok(())
+}
+
+/// Move/rename a local entry. `to` is the full destination path. Backs both
+/// the Rename menu action and "cut → paste" on the local side.
+pub fn rename_path(from: &str, to: &str) -> LocalResult<()> {
+    std::fs::rename(from, to)?;
+    Ok(())
+}
+
+/// Copy a local entry to `to`, recursing into directories. Backs
+/// "copy → paste" on the local side.
+pub fn copy_path(from: &str, to: &str) -> LocalResult<()> {
+    copy_recursive(Path::new(from), Path::new(to))?;
+    Ok(())
+}
+
+fn copy_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
+    if from.is_dir() {
+        std::fs::create_dir(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            copy_recursive(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        std::fs::copy(from, to)?;
+        Ok(())
+    }
+}
+
+/// Whether a local path already exists (and if so, whether it's a
+/// directory). Mirrors `transfer::remote_exists` for the local paste flow.
+pub fn exists(path: &str) -> LocalResult<ExistsResult> {
+    let p = Path::new(path);
+    let is_dir = p.is_dir();
+    Ok(ExistsResult {
+        exists: p.exists() || is_dir,
+        is_dir,
+    })
 }
 
 /// Convert a path to a UTF-8 string with forward slashes. On Windows the

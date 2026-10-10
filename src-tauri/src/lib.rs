@@ -141,6 +141,37 @@ fn local_delete(path: String) -> LocalResult<()> {
     local::delete_path(&path)
 }
 
+/// Create a single local directory.
+#[tauri::command]
+fn local_mkdir(path: String) -> LocalResult<()> {
+    local::make_dir(&path)
+}
+
+/// Create an empty local file. Fails if the path already exists.
+#[tauri::command]
+fn local_create_file(path: String) -> LocalResult<()> {
+    local::make_file(&path)
+}
+
+/// Move/rename a local entry. `to` is the full destination path.
+#[tauri::command]
+fn local_rename(from: String, to: String) -> LocalResult<()> {
+    local::rename_path(&from, &to)
+}
+
+/// Copy a local entry to `to`, recursing into directories.
+#[tauri::command]
+fn local_copy(from: String, to: String) -> LocalResult<()> {
+    local::copy_path(&from, &to)
+}
+
+/// Does `path` already exist locally? Backs the local paste/rename/create
+/// clash checks, mirroring `ftp_exists`.
+#[tauri::command]
+fn local_exists(path: String) -> LocalResult<ExistsResult> {
+    local::exists(&path)
+}
+
 /// Does `remote_path` already exist? Used by the paste flow to detect name
 /// clashes before it starts moving bytes around.
 #[tauri::command]
@@ -237,6 +268,11 @@ pub fn run() {
             local_read_text,
             local_write_text,
             local_delete,
+            local_mkdir,
+            local_create_file,
+            local_rename,
+            local_copy,
+            local_exists,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
