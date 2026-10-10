@@ -1,6 +1,6 @@
 [package]
 name = "superftp"
-version = "0.1.11"
+version = "0.1.12"
 description = "SuperFTP - A modern visual FTP client"
 authors = ["you"]
 edition = "2021"
