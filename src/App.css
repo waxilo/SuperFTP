@@ -307,6 +307,16 @@ input {
   letter-spacing: 0.02em;
 }
 
+/* The footer's single update control swaps between labels of different
+   length ("检查更新" → "下载中 5%" → "下载中 100%"). Without a floor the
+   growing percentage nudges the whole label sideways on every chunk, so the
+   button keeps a fixed width and centres its content instead. */
+.sidebar-footer .btn {
+  min-width: 112px;
+  justify-content: center;
+  font-variant-numeric: tabular-nums;
+}
+
 .sidebar-header {
   display: flex;
   align-items: center;
@@ -1389,59 +1399,6 @@ input[type="number"]::-webkit-outer-spin-button {
   cursor: not-allowed;
 }
 
-/* ---------- Update dialog ----------
-   Shown after a newer release has already been downloaded silently in the
-   background; the only decision left is "install now" or "later". */
-.modal.prompt-dialog.update-dialog {
-  width: min(380px, 92vw);
-}
-
-.update-lead {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0;
-  font-size: 12.5px;
-  color: var(--text-muted);
-}
-
-.update-lead svg {
-  flex-shrink: 0;
-  color: var(--accent);
-}
-
-.update-progress {
-  height: 6px;
-  border-radius: 999px;
-  overflow: hidden;
-  background: color-mix(in srgb, var(--text) 10%, transparent);
-}
-
-.update-progress-fill {
-  height: 100%;
-  min-width: 18px;
-  border-radius: 999px;
-  background: var(--accent);
-  transition: width 200ms ease;
-}
-
-/* No content-length from the server: sweep a bar segment back and forth so
-   the download still reads as "working" rather than a frozen track. */
-.update-progress-fill.indeterminate {
-  width: 35%;
-  animation: update-indeterminate 1.2s ease-in-out infinite;
-}
-
-@keyframes update-indeterminate {
-  0% {
-    transform: translateX(-100%);
-  }
-  100% {
-    transform: translateX(320%);
-  }
-}
-
-
 /* ---------- Context menu ---------- */
 
 .context-menu {
@@ -1492,10 +1449,11 @@ input[type="number"]::-webkit-outer-spin-button {
 /* ---------- Text viewer / editor (double-click a file) ---------- */
 
 .modal.text-viewer {
-  /* Wider + taller than the connection form modal, since this one is meant
-     to display files. Capped by viewport so it stays usable on small screens. */
-  width: min(900px, 94vw);
-  height: min(680px, 88vh);
+  /* The file is the point of this modal, so it takes 80% of the window in
+     both directions — tracking resizes instead of stopping at a fixed pixel
+     ceiling the way the form modals do. */
+  width: 80vw;
+  height: 80vh;
   display: flex;
   flex-direction: column;
 }

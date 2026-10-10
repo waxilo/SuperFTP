@@ -33,6 +33,7 @@ import {
   loadProfiles,
   saveProfiles,
 } from "./stores/connections";
+import { loadLastLocalPath, saveLastLocalPath } from "./stores/settings";
 import type { ConnectionProfile, FileEntry } from "./types";
 import { matchesFilter } from "./utils/filter";
 
@@ -352,17 +353,19 @@ export default function App() {
 
   // -- in-app silent update. The check runs a few seconds after startup so it
   // never competes with the initial listing for network or CPU; when a newer
-  // release exists its bytes download in the background with no user action
-  // at all, and only once they're fully on disk does a one-click install card
-  // appear. In dev builds the updater resolves to "no update", so this whole
-  // flow stays invisible during development.
+  // release exists its bytes download in the background with no user action at
+  // all. Nothing about it is modal — a hand-started check reports itself the
+  // same way the startup poll does, through the sidebar footer's own state, so
+  // an update can never interrupt a transfer or steal the window. In dev builds
+  // the updater resolves to "no update", so this flow stays invisible during
+  // development.
   const [updatePhase, setUpdatePhase] = useState<
-    "idle" | "downloading" | "ready" | "installing"
+    "idle" | "checking" | "downloading" | "ready" | "installing"
   >("idle");
-  const [updateProgress, setUpdateProgress] = useState({
-    received: 0,
-    total: null as number | null,
-  });
+  const [updateProgress, setUpdateProgress] = useState<{
+    received: number;
+    total: number | null;
+  }>({ received: 0, total: null });
   const [readyVersion, setReadyVersion] = useState("");
   const readyUpdateRef = useRef<ReadyUpdate | null>(null);
   // Set while a manual check from the sidebar footer is in flight, so the
@@ -370,16 +373,18 @@ export default function App() {
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [appVersion, setAppVersion] = useState("");
 
-  // True while a check was started from the sidebar button; decides whether
-  // "no update found" gets a toast (manual) or stays silent (startup poll).
+  // True while a check was started from the sidebar button; decides whether a
+  // result with nothing to show gets a toast (manual) or stays silent (startup
+  // poll).
   const manualCheckRef = useRef(false);
 
   const runUpdateCheck = useCallback(() => {
-    setUpdatePhase("downloading");
+    setUpdatePhase("checking");
     checkAndDownload(({ received, total }) => {
-      // The card only appears once the download finished, but keep the
-      // progress state current in case it's ever rendered mid-flight.
       setUpdateProgress({ received, total });
+      // The manifest fetch reports nothing, so the first bytes are what tell
+      // "still asking the endpoint" apart from "installer on its way".
+      if (received > 0) setUpdatePhase("downloading");
     })
       .then((u) => {
         setCheckingUpdate(false);
@@ -390,13 +395,13 @@ export default function App() {
         }
         readyUpdateRef.current = u;
         setReadyVersion(u.version);
-        // Drop the "checking…" toast so it doesn't float over the card.
-        setStatus(null);
         setUpdatePhase("ready");
+        setStatus(`新版本 v${u.version} 已下载完成，点击左下角即可安装`);
       })
       .catch(() => {
         setCheckingUpdate(false);
         setUpdatePhase("idle");
+        if (manualCheckRef.current) setStatus("检查更新失败，请稍后再试");
       });
   }, []);
 
@@ -419,13 +424,12 @@ export default function App() {
   }, []);
 
   const handleManualCheck = useCallback(() => {
-    // A finished download stays cached, so re-checking can just re-show the
-    // install card without touching the network again.
-    if (updatePhase === "ready" || updatePhase === "installing") {
-      if (readyUpdateRef.current) setUpdatePhase("ready");
+    if (
+      checkingUpdate ||
+      updatePhase === "checking" ||
+      updatePhase === "downloading"
+    )
       return;
-    }
-    if (checkingUpdate || updatePhase === "downloading") return;
     if (import.meta.env.DEV) {
       // The updater is inert in debug builds, so skip the pointless round
       // trip and say so instead of silently reporting "already current".
@@ -434,16 +438,8 @@ export default function App() {
     }
     setCheckingUpdate(true);
     manualCheckRef.current = true;
-    setStatus("正在检查更新…");
     runUpdateCheck();
   }, [checkingUpdate, runUpdateCheck, updatePhase]);
-
-  const dismissUpdate = useCallback(() => {
-    // The bytes are already verified and on disk; refusing to install now
-    // just means the same card (without a re-download) can reappear later.
-    setUpdatePhase("idle");
-    readyUpdateRef.current = null;
-  }, []);
 
   const installUpdate = useCallback(() => {
     const u = readyUpdateRef.current;
@@ -457,6 +453,22 @@ export default function App() {
       setUpdatePhase("ready");
     });
   }, []);
+
+  // The sidebar footer's single update control carries the whole lifecycle.
+  // "检查中…" covers the manifest round trip; a percentage is only possible
+  // once the endpoint has reported the installer's content length.
+  const updateBusy =
+    checkingUpdate ||
+    updatePhase === "checking" ||
+    updatePhase === "downloading";
+  const updateBusyLabel =
+    updatePhase !== "downloading"
+      ? "检查中…"
+      : updateProgress.total
+        ? `下载中 ${Math.floor(
+            (updateProgress.received / updateProgress.total) * 100
+          )}%`
+        : `下载中 ${formatBytes(updateProgress.received)}`;
 
   // -- filter (Ctrl+F)
   const [filterOpen, setFilterOpen] = useState(false);
@@ -495,7 +507,9 @@ export default function App() {
     saveProfiles(profiles).catch((e) => setError(String(e)));
   }, [profiles, profilesLoaded]);
 
-  // Initialize the local browser at the user's home directory once on mount.
+  // Lists a local directory and makes it the browser's current folder.
+  // Resolves to whether the listing succeeded, so the startup restore can
+  // tell a vanished folder apart from a usable one.
   const refreshLocalAt = useCallback(async (path: string) => {
     setLocalLoading(true);
     setLocalError(null);
@@ -516,23 +530,43 @@ export default function App() {
           is_hidden: e.is_hidden,
         })),
       );
-      setLocalCwd(result.cwd || path);
+      const cwd = result.cwd || path;
+      setLocalCwd(cwd);
+      // Every local navigation runs through here, so remembering the folder
+      // on success is all it takes to reopen it on the next launch.
+      saveLastLocalPath(cwd).catch((e) => setLocalError(String(e)));
       // Stale selected paths are pruned by the `visibleEntries` effect, which
       // sees whichever side is on screen — doing it here would clear the
       // remote selection when a download refreshes the local listing in the
       // background.
+      return true;
     } catch (e) {
       setLocalError(String(e));
+      return false;
     } finally {
       setLocalLoading(false);
     }
   }, []);
 
+  // Open where the user left off, falling back to their home directory. A
+  // remembered folder can stop existing between runs (deleted, or a drive
+  // that isn't mounted yet), which is why the restore is attempted rather
+  // than trusted.
   useEffect(() => {
-    localApi
-      .home()
-      .then((home) => refreshLocalAt(home))
-      .catch((e) => setLocalError(String(e)));
+    let cancelled = false;
+    (async () => {
+      const saved = await loadLastLocalPath().catch(() => null);
+      if (cancelled) return;
+      if (saved && (await refreshLocalAt(saved))) return;
+      try {
+        await refreshLocalAt(await localApi.home());
+      } catch (e) {
+        if (!cancelled) setLocalError(String(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [refreshLocalAt]);
 
   // Reveal the current local directory in the OS file manager (Explorer on
@@ -1899,25 +1933,50 @@ export default function App() {
           onSelectProfile={handleSelectProfile}
           onDisconnect={handleDisconnect}
         />
-        {/* Bottom-left strip: current version plus a manual update check for
-            users who don't want to wait for the silent startup poll. */}
+        {/* Bottom-left strip: the version plus the update control. One button
+            shows the whole updater lifecycle — checking, downloading, install —
+            so neither the silent startup poll nor a hand-started check ever
+            covers the window with a dialog. */}
         <footer className="sidebar-footer">
           <span className="app-version">v{appVersion || "dev"}</span>
-          <button
-            type="button"
-            className="btn ghost small"
-            onClick={handleManualCheck}
-            disabled={checkingUpdate}
-          >
-            {checkingUpdate ? (
-              <>
-                <Loader2 size={12} className="spin" />
-                检查中…
-              </>
-            ) : (
-              "检查更新"
-            )}
-          </button>
+          {updatePhase === "ready" || updatePhase === "installing" ? (
+            <button
+              type="button"
+              className="btn primary small"
+              onClick={installUpdate}
+              disabled={updatePhase === "installing"}
+              title={`安装 v${readyVersion} 并重启`}
+            >
+              {updatePhase === "installing" ? (
+                <>
+                  <Loader2 size={12} className="spin" />
+                  安装中…
+                </>
+              ) : (
+                <>
+                  <Download size={12} />
+                  安装 v{readyVersion}
+                </>
+              )}
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="btn ghost small"
+              onClick={handleManualCheck}
+              disabled={updateBusy}
+              title="检查是否有新版本"
+            >
+              {updateBusy ? (
+                <>
+                  <Loader2 size={12} className="spin" />
+                  {updateBusyLabel}
+                </>
+              ) : (
+                "检查更新"
+              )}
+            </button>
+          )}
         </footer>
       </aside>
 
@@ -2104,74 +2163,6 @@ export default function App() {
           onCancel={() => setRenameDialog(null)}
           onSubmit={submitRename}
         />
-      )}
-
-      {updatePhase !== "idle" && (
-        <div className="modal-backdrop">
-          <div className="modal prompt-dialog update-dialog">
-            <div className="modal-header">
-              <h2>
-                {updatePhase === "downloading"
-                  ? "正在下载新版本…"
-                  : `SuperFTP ${readyVersion} 已就绪`}
-              </h2>
-            </div>
-            <div className="form">
-              {updatePhase === "downloading" && (
-                <>
-                  <div className="update-progress">
-                    {updateProgress.total ? (
-                      <div
-                        className="update-progress-fill"
-                        style={{
-                          width: `${Math.min(98, (updateProgress.received / updateProgress.total) * 100)}%`,
-                        }}
-                      />
-                    ) : (
-                      <div className="update-progress-fill indeterminate" />
-                    )}
-                  </div>
-                  <p className="prompt-hint">
-                    {updateProgress.total
-                      ? `${formatBytes(updateProgress.received)} / ${formatBytes(updateProgress.total)}`
-                      : `${formatBytes(updateProgress.received)} 已下载`}
-                  </p>
-                </>
-              )}
-              {updatePhase !== "downloading" && (
-                <p className="update-lead">
-                  <Download size={16} />
-                  新版本已静默下载完成，安装后立即重启生效。
-                </p>
-              )}
-              <div className="modal-actions">
-                {updatePhase === "ready" && (
-                  <button className="btn ghost" onClick={dismissUpdate}>
-                    稍后
-                  </button>
-                )}
-                {updatePhase !== "downloading" && (
-                  <button
-                    className="btn primary"
-                    onClick={installUpdate}
-                    // Once the installer starts the app is about to die; a
-                    // second click would queue a duplicate relaunch.
-                    disabled={updatePhase === "installing"}
-                  >
-                    {updatePhase === "installing" ? (
-                      <>
-                        <Loader2 size={14} className="spin" />
-                        安装中…
-                      </>
-                    ) : (
-                      "立即安装并重启"
-                    )}
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
       )}
 
       {viewer && (
