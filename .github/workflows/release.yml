@@ -160,11 +160,11 @@ jobs:
             --arg pub_date "$PUB_DATE" \
             --arg notes "SuperFTP ${RELEASE_TAG}" \
             --arg url "${BASE_URL}/SuperFTP-${RELEASE_TAG}-Windows-x64-setup.exe" \
-            --sig  "$WIN_SIG_TEXT" \
+            --arg sig "$WIN_SIG_TEXT" \
             --arg mac_arm_url "${BASE_URL}/SuperFTP-${RELEASE_TAG}-macOS-ARM64.app.tar.gz" \
-            --sig2 "$ARM64_SIG_TEXT" \
+            --arg sig2 "$ARM64_SIG_TEXT" \
             --arg mac_x64_url "${BASE_URL}/SuperFTP-${RELEASE_TAG}-macOS-x64.app.tar.gz" \
-            --sig3 "$X64_SIG_TEXT" \
+            --arg sig3 "$X64_SIG_TEXT" \
             '{
               version: $version,
               notes: $notes,
