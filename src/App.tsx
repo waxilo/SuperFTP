@@ -23,6 +23,7 @@ import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
 import { PromptDialog } from "./components/PromptDialog";
 import { TextViewer } from "./components/TextViewer";
 import { Toast } from "./components/Toast";
+import { TitleBar } from "./components/TitleBar";
 
 import { ftpApi } from "./api/ftp";
 import { localApi } from "./api/local";
@@ -1881,6 +1882,7 @@ export default function App() {
 
   return (
     <div className="app">
+      <TitleBar />
       <aside className="sidebar">
         <Sidebar
           profiles={profiles}

@@ -29,6 +29,29 @@
   --glass-hairline-strong: rgba(255, 255, 255, 0.16);
   --glass-blur: 18px;
   --glass-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+
+  /* Custom chrome: the height of the self-drawn title bar, and the two thumb
+     tones used by the hand-rolled scrollbars below. */
+  --titlebar-h: 34px;
+  --scroll-thumb: rgba(255, 255, 255, 0.16);
+  --scroll-thumb-active: rgba(255, 255, 255, 0.32);
+  /* Width the hand-rolled scrollbars carve out of a scroller's content box.
+     Also the size of the sliver that continues the file table's header band
+     across that gutter (see `.file-list-container::after`). */
+  --scroll-gutter: 10px;
+  /* The file table's sticky header is the only scroller whose band has to be
+     continued across that gutter, so its height is pinned here and applied to
+     both the cells and the sliver. */
+  --table-head-h: 33px;
+
+  /* File-table row states. The table sits on a translucent panel, so both are
+     overlays rather than flat colours. Hover and selection are deliberately
+     pushed onto different channels — hover changes lightness only, selection
+     brings in the accent hue — so a hovered, a selected and a hovered+selected
+     row can never be mistaken for one another or for the panel behind them. */
+  --row-hover: rgba(255, 255, 255, 0.085);
+  --row-selected: color-mix(in srgb, var(--accent) 27%, transparent);
+  --row-selected-hover: color-mix(in srgb, var(--accent) 36%, transparent);
   --page-bg:
     radial-gradient(1200px 700px at 12% -8%, rgba(74, 141, 239, 0.20), transparent 60%),
     radial-gradient(1000px 640px at 92% 108%, rgba(47, 111, 237, 0.14), transparent 60%),
@@ -58,6 +81,13 @@
     --glass-hairline: rgba(15, 23, 42, 0.10);
     --glass-hairline-strong: rgba(15, 23, 42, 0.16);
     --glass-shadow: 0 8px 24px rgba(15, 23, 42, 0.10);
+    --scroll-thumb: rgba(15, 23, 42, 0.18);
+    --scroll-thumb-active: rgba(15, 23, 42, 0.34);
+    /* The light panel is nearly white, so the old `--bg-hover` (#eef1f5) was a
+       ~4/255 step and effectively invisible; this is a real step down. */
+    --row-hover: rgba(15, 23, 42, 0.075);
+    --row-selected: color-mix(in srgb, var(--accent) 24%, transparent);
+    --row-selected-hover: color-mix(in srgb, var(--accent) 32%, transparent);
     --page-bg:
       radial-gradient(1200px 700px at 12% -8%, rgba(47, 111, 237, 0.14), transparent 60%),
       radial-gradient(1000px 640px at 92% 108%, rgba(47, 111, 237, 0.10), transparent 60%),
@@ -100,20 +130,128 @@ input {
   font: inherit;
 }
 
+/* ---------- Custom scrollbars ----------
+   The native scrollbar is an OS widget whose width and palette are outside the
+   design, so it is replaced everywhere with a thin frosted thumb. Two notes
+   for future edits:
+
+   - `scrollbar-color` must stay unset. As soon as it has a value, Chromium
+     ignores every ::-webkit-scrollbar rule below.
+   - The gutter is 10px for a comfortable grab while the thumb is drawn 5px
+     wide inside it (transparent border + background-clip). The thumb is
+     always painted — Chromium does not re-resolve scrollbar styles when the
+     host element's `:hover` changes, so a "fade in over the list" effect
+     cannot be expressed in CSS here. */
+::-webkit-scrollbar {
+  width: var(--scroll-gutter);
+  height: var(--scroll-gutter);
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  background-clip: content-box;
+  border: 2.5px solid transparent;
+  border-radius: 999px;
+  min-width: 20px;
+  min-height: 28px;
+  transition: background-color 140ms ease;
+}
+
+::-webkit-scrollbar-thumb:hover,
+::-webkit-scrollbar-thumb:active,
+*:active::-webkit-scrollbar-thumb {
+  background-color: var(--scroll-thumb-active);
+}
+
+/* The file table's thumb travels below its NAME/SIZE header instead of sliding
+   past it — a thumb level with the header reads as a layout bug. Chromium gives
+   the track whatever height the stepper buttons don't take, so the top button
+   is repurposed as that inset. Blink derives ONE button size for both ends, so
+   this also takes --table-head-h off the bottom; `.file-table-wrap` hangs that
+   much past the panel to put the dead zone out of sight. */
+.file-table-wrap::-webkit-scrollbar-button:vertical:decrement {
+  display: block;
+  height: var(--table-head-h);
+  background: transparent;
+}
 /* ---------- Layout ---------- */
 
 .app {
   display: grid;
   grid-template-columns: 260px 1fr;
-  /* Pinning the row explicitly avoids the implicit `auto` row stretching to
-     fit a tall file table, which previously confused percentage children in
-     the sidebar. */
-  grid-template-rows: 100vh;
+  /* Two rows: the self-drawn title bar over the app body. Pinning them
+     explicitly avoids the implicit `auto` row stretching to fit a tall file
+     table, which previously confused percentage children in the sidebar. */
+  grid-template-rows: var(--titlebar-h) 1fr;
   height: 100vh;
   overflow: hidden;
 }
 
+/* ---------- Title bar ----------
+   Replaces the native window frame (`decorations: false`). The strip itself
+   is the drag region; only the three caption buttons are interactive. */
+.titlebar {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  display: flex;
+  align-items: stretch;
+  justify-content: flex-end;
+  background: var(--glass-panel-strong);
+  backdrop-filter: saturate(160%) blur(var(--glass-blur));
+  -webkit-backdrop-filter: saturate(160%) blur(var(--glass-blur));
+  border-bottom: 1px solid var(--glass-hairline);
+  /* Kept above modal backdrops: with the native frame gone this strip is the
+     only way to move or close the window, and a modal must not swallow it the
+     way a real title bar never is. */
+  position: relative;
+  z-index: 60;
+  /* Dragging must not select the strip's contents, and text dragging would
+     otherwise fight the window move. */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.titlebar-buttons {
+  display: flex;
+  align-items: stretch;
+}
+
+.win-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: var(--text-muted);
+  cursor: default;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.win-btn:hover {
+  background: var(--glass-chip-hover);
+  color: var(--text);
+}
+
+.win-btn:active {
+  background: var(--glass-chip);
+}
+
+/* Windows-style caption convention: close is the one hot-coloured button. */
+.win-btn.close:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
 .main {
+  grid-column: 2;
+  grid-row: 2;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -129,6 +267,8 @@ input {
 /* ---------- Sidebar ---------- */
 
 .sidebar {
+  grid-column: 1;
+  grid-row: 2;
   background: var(--glass-panel);
   backdrop-filter: saturate(160%) blur(var(--glass-blur));
   -webkit-backdrop-filter: saturate(160%) blur(var(--glass-blur));
@@ -491,9 +631,11 @@ input {
   font-size: 12px;
   color: var(--text-muted);
   overflow-x: auto;
-  /* When a deep path overflows, the *front* of the toolbar is the part
-     users expect to keep (root crumbs), so scroll from the tail edge. */
-  direction: rtl;
+  /* Deliberately LTR. `direction: rtl` used to sit here to keep the root end
+     on screen when a deep path overflows, but it mirrors the whole row: the
+     crumbs read leaf→root and the home button lands at the far right. A plain
+     LTR scroller keeps that same end — the overflow runs off the right edge —
+     without reversing the path. */
   scrollbar-width: none;
 }
 
@@ -585,11 +727,25 @@ input {
 .file-table-wrap {
   flex: 1;
   overflow: auto;
+  /* Chromium derives one stepper size for BOTH scrollbar ends, so the header
+     inset on the track costs an equal dead zone at the bottom: fully scrolled
+     down, the thumb stopped --table-head-h short of the panel edge. Hanging the
+     scroll box that far past the container's bottom edge — which clips it —
+     moves the dead zone out of sight, so the thumb ends flush. The matching
+     padding then keeps the last row on the visible edge instead of sliding it
+     into the clipped band. */
+  margin-bottom: calc(-1 * var(--table-head-h));
+  padding-bottom: var(--table-head-h);
 }
 
 .file-table {
   width: 100%;
-  border-collapse: collapse;
+  /* `separate` rather than `collapse` so the header's 1px bottom border is
+     drawn as a real 1 CSS px line. Collapsed table borders get snapped down to
+     a single device pixel, which left it a device row off from the gutter
+     patch below and showed a jog where the hairline crossed the scrollbar. */
+  border-collapse: separate;
+  border-spacing: 0;
   font-size: 12.5px;
 }
 
@@ -597,6 +753,10 @@ input {
   position: sticky;
   top: 0;
   z-index: 1;
+  /* Pinned because the header's band is continued into the scrollbar gutter by
+     `.file-list-container::after` below; the two heights must stay in
+     lockstep. */
+  height: var(--table-head-h);
   text-align: left;
   font-weight: 600;
   font-size: 11px;
@@ -610,6 +770,33 @@ input {
   -webkit-backdrop-filter: saturate(160%) blur(var(--glass-blur));
   padding: 8px 12px;
   border-bottom: 1px solid var(--glass-hairline);
+}
+
+/* The vertical scrollbar takes --scroll-gutter out of the scroller's content
+   box, so the sticky header band stopped short of the panel's right edge and
+   left a notch in the top-right corner. This continues the band across it.
+   Three details are load-bearing:
+   - it hangs off the non-scrolling container, because a scroller clips its
+     overflow at the scrollport, which already excludes the scrollbar;
+   - box-sizing is spelled out because the `*` reset above doesn't reach
+     pseudo-elements and box-sizing isn't inherited, which made the patch a
+     pixel too tall;
+   - the extra half pixel puts the patch's border on the same device rows the
+     header cell paints its (edge-centred) bottom border on, so the hairline
+     crosses the gutter without a jog.
+   With a short listing there is no gutter and the patch just sits on top of the
+   header cell, where the two identical tones merge. */
+.file-list-container::after {
+  content: "";
+  position: absolute;
+  box-sizing: border-box;
+  top: 0;
+  right: 0;
+  width: var(--scroll-gutter);
+  height: calc(var(--table-head-h) + 0.5px);
+  background: var(--glass-panel-strong);
+  border-bottom: 1px solid var(--glass-hairline);
+  pointer-events: none;
 }
 
 /* Sortable-header button. Sits inside a <th> and inherits the header's
@@ -658,20 +845,38 @@ input {
 }
 
 .file-table tbody tr.row:hover {
-  background: var(--bg-hover);
+  background: var(--row-hover);
 }
 
-/* Selected rows — the targets for Ctrl+C / Ctrl+X / Delete. Kept subtle: a
-   tinted background plus an accent rail on the left edge, so it reads as
-   "current" without competing with the hover state. Applies to every row of a
-   multi-selection, so a Ctrl+A'd listing reads as one continuous block. */
-.file-table tbody tr.row.selected,
+/* Windowing spacers (see FileList.tsx). They stand in for the rows that
+   aren't in the DOM, so they must contribute exactly the height they were
+   given — no padding, no border, no hover tint, and they never intercept
+   clicks. */
+.file-table tbody tr.row-spacer td {
+  padding: 0;
+  border: 0;
+}
+
+.file-table tbody tr.row-spacer {
+  background: transparent;
+  pointer-events: none;
+}
+
+/* Selected rows — the targets for Ctrl+C / Ctrl+X / Delete. The fill carries
+   the accent hue while hover only changes lightness, so a selection reads as a
+   different *kind* of state rather than just a slightly darker row. Applies to
+   every row of a multi-selection, so a Ctrl+A'd listing reads as one
+   continuous block. */
+.file-table tbody tr.row.selected {
+  background: var(--row-selected);
+}
+
 .file-table tbody tr.row.selected:hover {
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  background: var(--row-selected-hover);
 }
 
 .file-table tbody tr.row.selected td:first-child {
-  box-shadow: inset 2px 0 0 var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 /* An entry waiting to be moved by a paste. Dimmed the way desktop file
@@ -772,6 +977,10 @@ input {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* Clips the scroll box's deliberately hanging bottom edge (see
+     `.file-table-wrap`). Nothing is meant to escape this box — the context menu
+     lives at the app root, not here. */
+  overflow: hidden;
 }
 
 .loading-overlay {
@@ -847,7 +1056,7 @@ input {
    and the box itself still receive input. */
 .toaster {
   position: fixed;
-  top: 10px;                    /* sits in the toolbar's vertical band */
+  top: calc(var(--titlebar-h) + 10px);   /* just under the title bar */
   left: 50%;
   transform: translateX(-50%);  /* horizontally centered against viewport */
   z-index: 200;
@@ -1014,6 +1223,56 @@ input {
 
 .form label.checkbox input {
   width: auto;
+  margin: 0;
+}
+
+/* The native checkbox and the number-field spin buttons are OS-drawn too.
+   Only their paint is replaced — the underlying input, its keyboard behaviour
+   and its `checked` semantics are untouched. Selectors stay long enough to
+   outrank the `.form label.checkbox input` reset above. */
+.form label.checkbox input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-grid;
+  place-content: center;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--bg);
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.form label.checkbox input[type="checkbox"]:hover {
+  border-color: var(--accent);
+}
+
+.form label.checkbox input[type="checkbox"]:checked {
+  background-color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* The tick is drawn with borders rather than an image so it inherits the
+   accent fill and stays crisp at any zoom. */
+.form label.checkbox input[type="checkbox"]:checked::after {
+  content: "";
+  width: 7px;
+  height: 3.5px;
+  border-left: 2px solid #fff;
+  border-bottom: 2px solid #fff;
+  transform: rotate(-45deg) translateY(-1px);
+}
+
+.form label.checkbox input[type="checkbox"]:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
   margin: 0;
 }
 

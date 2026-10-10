@@ -1,4 +1,12 @@
-import { useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import {
   ChevronDown,
   ChevronUp,
@@ -40,6 +48,26 @@ const NO_PATHS: ReadonlySet<string> = new Set<string>();
 
 type SortKey = "name" | "modified";
 type SortDir = "asc" | "desc";
+
+/** Reused for every name comparison. `a.localeCompare(b, undefined, {...})`
+ *  builds a collator on each call, which costs hundreds of milliseconds on a
+ *  five-figure listing; one shared Collator is roughly an order of magnitude
+ *  faster and applies identical rules. */
+const NAME_COLLATOR = new Intl.Collator(undefined, {
+  numeric: true,
+  sensitivity: "base",
+});
+
+/** Assumed row height until the real one can be measured from the DOM (see
+ *  `rowH`), and the number of extra rows rendered above/below the viewport so
+ *  scrolling never shows a gap. */
+const ROW_HEIGHT_FALLBACK = 34;
+const OVERSCAN = 8;
+
+/** Below this many rows the list is rendered in full. Windowing a short list
+ *  buys nothing and keeps the component honest before the viewport has been
+ *  measured (first paint reports a height of 0). */
+const VIRTUALIZE_THRESHOLD = 200;
 
 function humanSize(bytes: number): string {
   if (bytes === 0) return "—";
@@ -110,31 +138,100 @@ export function FileList({
 
   const sorted = useMemo(() => {
     if (!sortKey) return filtered;
-    const arr = [...filtered];
-    arr.sort((a, b) => {
-      // Directories always float above files, matching common file managers.
-      if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
-      let cmp = 0;
-      if (sortKey === "name") {
-        cmp = a.name.localeCompare(b.name, undefined, {
-          numeric: true,
-          sensitivity: "base",
-        });
-      } else {
-        // Missing timestamps sink to the bottom regardless of direction.
-        const ta = a.modified ? Date.parse(a.modified) : NaN;
-        const tb = b.modified ? Date.parse(b.modified) : NaN;
-        const aBad = Number.isNaN(ta);
-        const bBad = Number.isNaN(tb);
-        if (aBad && bBad) cmp = 0;
-        else if (aBad) return 1;
-        else if (bBad) return -1;
-        else cmp = ta - tb;
-      }
-      return sortDir === "asc" ? cmp : -cmp;
+    const dir = sortDir === "asc" ? 1 : -1;
+    if (sortKey === "name") {
+      return [...filtered].sort((a, b) => {
+        // Directories always float above files, matching common file managers.
+        if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+        return dir * NAME_COLLATOR.compare(a.name, b.name);
+      });
+    }
+    // Timestamps are parsed once per entry rather than once per comparison
+    // (~2n against n log n), because Date.parse inside the comparator
+    // dominated the sort on large listings.
+    const stamped = filtered.map((e) => ({
+      e,
+      t: e.modified ? Date.parse(e.modified) : NaN,
+    }));
+    stamped.sort((a, b) => {
+      if (a.e.is_dir !== b.e.is_dir) return a.e.is_dir ? -1 : 1;
+      const aBad = Number.isNaN(a.t);
+      const bBad = Number.isNaN(b.t);
+      // Missing timestamps sink to the bottom regardless of direction.
+      if (aBad && bBad) return 0;
+      if (aBad) return 1;
+      if (bBad) return -1;
+      return dir * (a.t - b.t);
     });
-    return arr;
+    return stamped.map((s) => s.e);
   }, [filtered, sortKey, sortDir]);
+
+  // -- windowed rendering. A big directory (tens of thousands of rows) is
+  // unusable if every entry becomes a real <tr>: the DOM build, the inline
+  // row closures and one toLocaleString() per timestamp all scale linearly,
+  // so the pane stays blank long after the listing has arrived. Only the
+  // visible slice is rendered, with empty rows above and below standing in
+  // for the hidden ones to preserve the scrollbar size and position.
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  // One extra slot when the ".." row is present; it lives inside the window
+  // too, so the row math below treats it as index 0.
+  const upRow = canGoUp && !filter;
+  const rowCount = filtered.length + (upRow ? 1 : 0);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportH, setViewportH] = useState(0);
+  const [rowH, setRowH] = useState(ROW_HEIGHT_FALLBACK);
+
+  // rAF-throttled so a fast flick doesn't schedule a render per event.
+  const scrollRaf = useRef(0);
+  const handleScroll = useCallback(() => {
+    if (scrollRaf.current) return;
+    scrollRaf.current = requestAnimationFrame(() => {
+      scrollRaf.current = 0;
+      const el = wrapRef.current;
+      if (el) setScrollTop(el.scrollTop);
+    });
+  }, []);
+  useEffect(() => () => cancelAnimationFrame(scrollRaf.current), []);
+
+  // Re-sync geometry whenever the row count changes: navigating into a new
+  // directory can clamp the browser's scrollTop without firing a scroll event
+  // in time, and the row height is only measurable once rows exist.
+  useLayoutEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    setScrollTop(el.scrollTop);
+    setViewportH(el.clientHeight);
+    // Fractional height on purpose: `offsetHeight` rounds (36.625 → 37), and
+    // that 0.4px/row error compounds into a multi-row offset by the time the
+    // user has scrolled deep into a five-figure listing.
+    const probe = el.querySelector<HTMLElement>("tbody tr.row");
+    const measured = probe && probe.getBoundingClientRect().height;
+    if (measured && measured > 0) setRowH(measured);
+  }, [rowCount]);
+
+  // Track container resizes (window resize, filter bar appearing).
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => setViewportH(el.clientHeight));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const windowed = rowCount > VIRTUALIZE_THRESHOLD;
+  const first = windowed
+    ? Math.max(0, Math.floor(scrollTop / rowH) - OVERSCAN)
+    : 0;
+  const last = windowed
+    ? Math.min(
+        rowCount,
+        first + Math.ceil((viewportH || 600) / rowH) + OVERSCAN * 2,
+      )
+    : rowCount;
+  // Rows the spacers stand in for. Measured in real pixels so the scrollbar
+  // keeps its length and thumb position even though the DOM is short.
+  const padTop = first * rowH;
+  const padBottom = (rowCount - last) * rowH;
 
   /** Selection semantics, matching desktop file managers:
    *  - plain click     → select just this row, and make it the anchor
@@ -185,14 +282,112 @@ export function FileList({
     );
   }
 
+  // The ".." row occupies index 0 of the window's coordinate space when it is
+  // shown, so the row math and the spacers stay in sync with it. It is itself
+  // a rendered row, so it only appears while index 0 is inside the window.
+  const upRowNode =
+    upRow && first === 0 ? (
+    <tr key="__up" className="row up" onDoubleClick={onGoUp}>
+      <td className="col-name">
+        <button className="name-cell" onClick={onGoUp} title="Go up">
+          <CornerUpLeft size={16} className="icon dir" />
+          <span>..</span>
+        </button>
+      </td>
+      <td>—</td>
+      {showPermissions && <td>—</td>}
+      <td>—</td>
+    </tr>
+  ) : null;
+
+  const windowRows: FileEntry[] = [];
+  for (let i = first; i < last; i++) {
+    // Index 0 belongs to the ".." row, which is rendered separately above.
+    if (upRow && i === 0) continue;
+    const entry = sorted[i - (upRow ? 1 : 0)];
+    if (entry) windowRows.push(entry);
+  }
+
+  function renderEntryRow(entry: FileEntry) {
+    const Icon = entry.is_symlink ? Link2 : entry.is_dir ? Folder : FileText;
+    return (
+      <tr
+        key={entry.path}
+        className={[
+          "row",
+          selectedPaths.has(entry.path) ? "selected" : "",
+          cutPaths.has(entry.path) ? "cut" : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+        onClick={(e) => handleRowClick(entry, e)}
+        onDoubleClick={() => onOpen(entry)}
+        onContextMenu={(e) => {
+          if (!onContextMenu) return;
+          e.preventDefault();
+          // App retargets the selection when the click lands outside
+          // it, and keeps it when the row is part of a multi-select.
+          // Either way this row becomes the Shift anchor.
+          setAnchor(entry.path);
+          onContextMenu(entry, e.clientX, e.clientY);
+        }}
+      >
+        <td className="col-name">
+          <button
+            className="name-cell"
+            onClick={(e) => {
+              // With a modifier held the click means "select", not
+              // "open" — let it bubble to the row handler.
+              if (e.ctrlKey || e.metaKey || e.shiftKey) return;
+              if (!entry.is_dir) return;
+              // Navigating away invalidates the selection, so don't
+              // let this bubble to the row handler and re-arm it
+              // against the folder we're leaving.
+              e.stopPropagation();
+              onOpen(entry);
+            }}
+            title={entry.path}
+          >
+            <Icon
+              size={16}
+              className={`icon ${entry.is_dir ? "dir" : "file"}`}
+            />
+            <span>{entry.name}</span>
+          </button>
+        </td>
+        <td>{entry.is_dir ? "—" : humanSize(entry.size)}</td>
+        {showPermissions && (
+          <td className="mono">{entry.permissions ?? "—"}</td>
+        )}
+        <td>{formatTime(entry.modified)}</td>
+      </tr>
+    );
+  }
+
+  // A bare <tr> with the outstanding height, so the table's total height —
+  // and therefore the scrollbar length and thumb position — matches the full
+  // listing even though only the visible slice is in the DOM.
+  function spacerRow(px: number, key: string) {
+    if (px <= 0) return null;
+    return (
+      <tr key={key} className="row-spacer" aria-hidden="true">
+        <td colSpan={columnCount} style={{ height: `${px}px` }} />
+      </tr>
+    );
+  }
+
   return (
     <div
+      ref={wrapRef}
       className="file-table-wrap"
+      onScroll={handleScroll}
       onClick={(e) => {
         // Clicking genuinely empty space clears the selection. Anything
         // inside a row (or a header cell, e.g. the sort buttons) is left to
-        // its own handler.
-        if ((e.target as HTMLElement).closest("tr")) return;
+        // its own handler. The windowing spacers count as empty space — they
+        // exist only to hold the scrollbar's length, not to be interacted
+        // with.
+        if ((e.target as HTMLElement).closest("tr:not(.row-spacer)")) return;
         onSelectionChange?.([]);
       }}
       onContextMenu={(e) => {
@@ -232,75 +427,13 @@ export function FileList({
           </tr>
         </thead>
         <tbody>
-          {canGoUp && !filter && (
-            <tr className="row up" onDoubleClick={onGoUp}>
-              <td className="col-name">
-                <button className="name-cell" onClick={onGoUp} title="Go up">
-                  <CornerUpLeft size={16} className="icon dir" />
-                  <span>..</span>
-                </button>
-              </td>
-              <td>—</td>
-              {showPermissions && <td>—</td>}
-              <td>—</td>
-            </tr>
-          )}
+          {spacerRow(padTop, "pad-top")}
 
-          {sorted.map((entry) => {
-            const Icon = entry.is_symlink ? Link2 : entry.is_dir ? Folder : FileText;
-            return (
-              <tr
-                key={entry.path}
-                className={[
-                  "row",
-                  selectedPaths.has(entry.path) ? "selected" : "",
-                  cutPaths.has(entry.path) ? "cut" : "",
-                ]
-                  .filter(Boolean)
-                  .join(" ")}
-                onClick={(e) => handleRowClick(entry, e)}
-                onDoubleClick={() => onOpen(entry)}
-                onContextMenu={(e) => {
-                  if (!onContextMenu) return;
-                  e.preventDefault();
-                  // App retargets the selection when the click lands outside
-                  // it, and keeps it when the row is part of a multi-select.
-                  // Either way this row becomes the Shift anchor.
-                  setAnchor(entry.path);
-                  onContextMenu(entry, e.clientX, e.clientY);
-                }}
-              >
-                <td className="col-name">
-                  <button
-                    className="name-cell"
-                    onClick={(e) => {
-                      // With a modifier held the click means "select", not
-                      // "open" — let it bubble to the row handler.
-                      if (e.ctrlKey || e.metaKey || e.shiftKey) return;
-                      if (!entry.is_dir) return;
-                      // Navigating away invalidates the selection, so don't
-                      // let this bubble to the row handler and re-arm it
-                      // against the folder we're leaving.
-                      e.stopPropagation();
-                      onOpen(entry);
-                    }}
-                    title={entry.path}
-                  >
-                    <Icon
-                      size={16}
-                      className={`icon ${entry.is_dir ? "dir" : "file"}`}
-                    />
-                    <span>{entry.name}</span>
-                  </button>
-                </td>
-                <td>{entry.is_dir ? "—" : humanSize(entry.size)}</td>
-                {showPermissions && (
-                  <td className="mono">{entry.permissions ?? "—"}</td>
-                )}
-                <td>{formatTime(entry.modified)}</td>
-              </tr>
-            );
-          })}
+          {upRowNode}
+
+          {windowRows.map(renderEntryRow)}
+
+          {spacerRow(padBottom, "pad-bottom")}
 
           {sorted.length === 0 && (
             <tr>
