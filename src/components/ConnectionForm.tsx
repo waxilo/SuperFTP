@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { X } from "lucide-react";
+import { Eye, EyeOff, X } from "lucide-react";
 import type { ConnectionProfile, Protocol } from "../types";
 
 interface Props {
@@ -19,6 +19,7 @@ const DEFAULT_PORTS: Record<Protocol, number> = {
 
 export function ConnectionForm({ initial, title, onCancel, onSubmit }: Props) {
   const [profile, setProfile] = useState<ConnectionProfile>(initial);
+  const [passwordVisible, setPasswordVisible] = useState(false);
 
   useEffect(() => {
     setProfile(initial);
@@ -122,12 +123,26 @@ export function ConnectionForm({ initial, title, onCancel, onSubmit }: Props) {
             </label>
             <label className="grow">
               <span>Password</span>
-              <input
-                type="password"
-                value={profile.password}
-                onChange={(e) => update("password", e.target.value)}
-                placeholder=""
-              />
+              <div className="password-field">
+                <input
+                  type={passwordVisible ? "text" : "password"}
+                  value={profile.password}
+                  onChange={(e) => update("password", e.target.value)}
+                  placeholder=""
+                />
+                {/* mousedown is prevented so the button doesn't also trigger
+                    the surrounding label and steal focus from the input. */}
+                <button
+                  type="button"
+                  className={`icon-btn small ${passwordVisible ? "active" : ""}`}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => setPasswordVisible((v) => !v)}
+                  title={passwordVisible ? "Hide password" : "Show password"}
+                  aria-label={passwordVisible ? "Hide password" : "Show password"}
+                >
+                  {passwordVisible ? <Eye size={14} /> : <EyeOff size={14} />}
+                </button>
+              </div>
             </label>
           </div>
 
