@@ -10,6 +10,8 @@
       "identifier": "opener:allow-open-path",
       "allow": [{ "path": "**" }]
     },
-    "store:default"
+    "store:default",
+    "updater:default",
+    "process:default"
   ]
 }

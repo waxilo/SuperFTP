@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Download,
   Eye,
   EyeOff,
   FilePlus,
@@ -24,6 +25,7 @@ import { Toast } from "./components/Toast";
 
 import { ftpApi } from "./api/ftp";
 import { localApi } from "./api/local";
+import { checkAndDownload, type ReadyUpdate } from "./api/update";
 import {
   emptyProfile,
   loadProfiles,
@@ -112,6 +114,17 @@ interface ViewerState {
   error: string | null;
   truncated: boolean;
   size: number;
+}
+
+function formatBytes(bytes: number): string {
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let i = 0;
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024;
+    i += 1;
+  }
+  return `${value >= 10 || i === 0 ? Math.round(value) : value.toFixed(1)} ${units[i]}`;
 }
 
 function parentOf(path: string): string {
@@ -334,6 +347,64 @@ export default function App() {
   const [renameDialog, setRenameDialog] = useState<RenameDialogState | null>(
     null,
   );
+
+  // -- in-app silent update. The check runs a few seconds after startup so it
+  // never competes with the initial listing for network or CPU; when a newer
+  // release exists its bytes download in the background with no user action
+  // at all, and only once they're fully on disk does a one-click install card
+  // appear. In dev builds the updater resolves to "no update", so this whole
+  // flow stays invisible during development.
+  const [updatePhase, setUpdatePhase] = useState<
+    "idle" | "downloading" | "ready" | "installing"
+  >("idle");
+  const [updateProgress, setUpdateProgress] = useState({
+    received: 0,
+    total: null as number | null,
+  });
+  const [readyVersion, setReadyVersion] = useState("");
+  const readyUpdateRef = useRef<ReadyUpdate | null>(null);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setUpdatePhase("downloading");
+      checkAndDownload(({ received, total }) => {
+        // The card only appears once the download finished, but keep the
+        // progress state current in case it's ever rendered mid-flight.
+        setUpdateProgress({ received, total });
+      })
+        .then((u) => {
+          if (!u) {
+            setUpdatePhase("idle");
+            return;
+          }
+          readyUpdateRef.current = u;
+          setReadyVersion(u.version);
+          setUpdatePhase("ready");
+        })
+        .catch(() => setUpdatePhase("idle"));
+    }, 4000);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  const dismissUpdate = useCallback(() => {
+    // The bytes are already verified and on disk; refusing to install now
+    // just means the same card (without a re-download) can reappear later.
+    setUpdatePhase("idle");
+    readyUpdateRef.current = null;
+  }, []);
+
+  const installUpdate = useCallback(() => {
+    const u = readyUpdateRef.current;
+    if (!u) return;
+    setUpdatePhase("installing");
+    // Windows runs the cached NSIS installer silently and the app restarts
+    // into the new version; a failure (e.g. the app was launched from a
+    // read-only location) must not leave the card stuck mid-spinner.
+    u.installAndRestart().catch((e) => {
+      setError(String(e));
+      setUpdatePhase("ready");
+    });
+  }, []);
 
   // -- filter (Ctrl+F)
   const [filterOpen, setFilterOpen] = useState(false);
@@ -1960,6 +2031,74 @@ export default function App() {
           onCancel={() => setRenameDialog(null)}
           onSubmit={submitRename}
         />
+      )}
+
+      {updatePhase !== "idle" && (
+        <div className="modal-backdrop">
+          <div className="modal prompt-dialog update-dialog">
+            <div className="modal-header">
+              <h2>
+                {updatePhase === "ready" || updatePhase === "installing"
+                  ? `SuperFTP ${readyVersion} 已就绪`
+                  : "正在下载新版本…"}
+              </h2>
+            </div>
+            <div className="form">
+              {updatePhase === "downloading" && (
+                <>
+                  <div className="update-progress">
+                    {updateProgress.total ? (
+                      <div
+                        className="update-progress-fill"
+                        style={{
+                          width: `${Math.min(98, (updateProgress.received / updateProgress.total) * 100)}%`,
+                        }}
+                      />
+                    ) : (
+                      <div className="update-progress-fill indeterminate" />
+                    )}
+                  </div>
+                  <p className="prompt-hint">
+                    {updateProgress.total
+                      ? `${formatBytes(updateProgress.received)} / ${formatBytes(updateProgress.total)}`
+                      : `${formatBytes(updateProgress.received)} 已下载`}
+                  </p>
+                </>
+              )}
+              {updatePhase !== "downloading" && (
+                <p className="update-lead">
+                  <Download size={16} />
+                  新版本已静默下载完成，安装后立即重启生效。
+                </p>
+              )}
+              <div className="modal-actions">
+                {updatePhase === "ready" && (
+                  <button className="btn ghost" onClick={dismissUpdate}>
+                    稍后
+                  </button>
+                )}
+                {updatePhase !== "downloading" && (
+                  <button
+                    className="btn primary"
+                    onClick={installUpdate}
+                    // Once the installer starts the app is about to die; a
+                    // second click would queue a duplicate relaunch.
+                    disabled={updatePhase === "installing"}
+                  >
+                    {updatePhase === "installing" ? (
+                      <>
+                        <Loader2 size={14} className="spin" />
+                        安装中…
+                      </>
+                    ) : (
+                      "立即安装并重启"
+                    )}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {viewer && (

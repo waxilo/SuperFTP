@@ -55,8 +55,10 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # PR 构建没有签名密钥，用 --config 关掉 updater 产物生成；
+      # release.yml 的正式构建才会带 .sig（应用内更新依赖它）。
       - name: Build Tauri app
-        run: npm run tauri build -- ${{ matrix.args }}
+        run: npm run tauri build -- ${{ matrix.args }} --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

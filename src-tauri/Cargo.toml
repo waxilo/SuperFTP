@@ -39,3 +39,5 @@ russh-sftp = "2.3"
 # Pin transitive `time` to a version compatible with the `cookie 0.18` API
 # (the cookie crate hasn't yet updated to `time 0.3.45+` parse signature).
 time = "=0.3.44"
+tauri-plugin-updater = "2.13.2"
+tauri-plugin-process = "2.4.0"

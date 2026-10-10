@@ -59,7 +59,13 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # TAURI_SIGNING_PRIVATE_KEY (plus _PASSWORD if set) must exist as repo
+      # secrets; the bundler writes a .sig next to each installer with it, and
+      # the in-app updater verifies those signatures.
       - name: Build Tauri app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri build -- ${{ matrix.args }}
 
       - name: Upload build artifacts
@@ -121,12 +127,56 @@ jobs:
           X64_DMG="$(find_installer macOS-x64 '*.dmg')"
           WIN_MSI="$(find_installer Windows-x64 '*.msi')"
           WIN_EXE="$(find_installer Windows-x64 '*.exe')"
+          WIN_SIG="$(find_installer Windows-x64 '*setup.exe.sig')"
+          ARM64_TGZ="$(find_installer macOS-ARM64 '*.app.tar.gz')"
+          ARM64_TGZ_SIG="$(find_installer macOS-ARM64 '*.app.tar.gz.sig')"
+          X64_TGZ="$(find_installer macOS-x64 '*.app.tar.gz')"
+          X64_TGZ_SIG="$(find_installer macOS-x64 '*.app.tar.gz.sig')"
 
           copy_or_fail "$ARM64_DMG" "SuperFTP-${RELEASE_TAG}-macOS-ARM64.dmg"
           copy_or_fail "$X64_DMG"   "SuperFTP-${RELEASE_TAG}-macOS-x64.dmg"
           copy_or_fail "$WIN_MSI"   "SuperFTP-${RELEASE_TAG}-Windows-x64.msi"
           copy_or_fail "$WIN_EXE"   "SuperFTP-${RELEASE_TAG}-Windows-x64-setup.exe"
+          copy_or_fail "$WIN_SIG"   "SuperFTP-${RELEASE_TAG}-Windows-x64-setup.exe.sig"
 
+          # macOS updaters install by unpacking a .app.tar.gz, so they must
+          # ship alongside (and their signatures feed latest.json below).
+          copy_or_fail "$ARM64_TGZ"     "SuperFTP-${RELEASE_TAG}-macOS-ARM64.app.tar.gz"
+          copy_or_fail "$ARM64_TGZ_SIG" "SuperFTP-${RELEASE_TAG}-macOS-ARM64.app.tar.gz.sig"
+          copy_or_fail "$X64_TGZ"       "SuperFTP-${RELEASE_TAG}-macOS-x64.app.tar.gz"
+          copy_or_fail "$X64_TGZ_SIG"   "SuperFTP-${RELEASE_TAG}-macOS-x64.app.tar.gz.sig"
+
+          # latest.json is what the in-app updater polls. Signature files are
+          # base64 text; `tr -d '\r'` guards against CRLF on the Windows build.
+          WIN_SIG_TEXT="$(tr -d '\r' < "release-assets/SuperFTP-${RELEASE_TAG}-Windows-x64-setup.exe.sig")"
+          ARM64_SIG_TEXT="$(tr -d '\r' < "release-assets/SuperFTP-${RELEASE_TAG}-macOS-ARM64.app.tar.gz.sig")"
+          X64_SIG_TEXT="$(tr -d '\r' < "release-assets/SuperFTP-${RELEASE_TAG}-macOS-x64.app.tar.gz.sig")"
+          VERSION="${RELEASE_TAG#v}"
+          PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+          BASE_URL="https://github.com/waxilo/SuperFTP/releases/download/${RELEASE_TAG}"
+
+          jq -n \
+            --arg version "$VERSION" \
+            --arg pub_date "$PUB_DATE" \
+            --arg notes "SuperFTP ${RELEASE_TAG}" \
+            --arg url "${BASE_URL}/SuperFTP-${RELEASE_TAG}-Windows-x64-setup.exe" \
+            --sig  "$WIN_SIG_TEXT" \
+            --arg mac_arm_url "${BASE_URL}/SuperFTP-${RELEASE_TAG}-macOS-ARM64.app.tar.gz" \
+            --sig2 "$ARM64_SIG_TEXT" \
+            --arg mac_x64_url "${BASE_URL}/SuperFTP-${RELEASE_TAG}-macOS-x64.app.tar.gz" \
+            --sig3 "$X64_SIG_TEXT" \
+            '{
+              version: $version,
+              notes: $notes,
+              pub_date: $pub_date,
+              platforms: {
+                "windows-x86_64": { signature: $sig, url: $url },
+                "darwin-aarch64": { signature: $sig2, url: $mac_arm_url },
+                "darwin-x86_64": { signature: $sig3, url: $mac_x64_url }
+              }
+            }' > release-assets/latest.json
+
+          cat release-assets/latest.json
           ls -la release-assets/
 
       - name: Create GitHub Release
@@ -161,6 +211,8 @@ jobs:
             echo "### Windows"
             echo "- \`SuperFTP-${RELEASE_TAG}-Windows-x64.msi\`"
             echo "- \`SuperFTP-${RELEASE_TAG}-Windows-x64-setup.exe\`"
+            echo
+            echo "> 已安装旧版用户无需手动下载：应用会静默检测并下载此版本，一键安装重启即可。"
             echo
             echo "> 首次在 macOS 打开若提示未验证开发者，请在「系统设置 → 隐私与安全性」中允许运行。"
           } > release-notes.md
