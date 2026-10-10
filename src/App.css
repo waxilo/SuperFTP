@@ -148,6 +148,25 @@ input {
   flex: 1 1 auto;
 }
 
+/* Bottom strip: current version on the left, manual update check on the
+   right. Shares the sidebar's frosted panel, separated by a hairline. */
+.sidebar-footer {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--glass-hairline);
+}
+
+.app-version {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
 .sidebar-header {
   display: flex;
   align-items: center;
@@ -390,6 +409,13 @@ input {
 .btn.ghost {
   background: transparent;
   border-color: transparent;
+}
+
+/* Compact variant for tight strips (e.g. the sidebar footer). */
+.btn.small {
+  padding: 4px 10px;
+  font-size: 11px;
+  gap: 5px;
 }
 
 /* ---------- Toolbar / breadcrumb ---------- */

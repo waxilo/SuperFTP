@@ -11,6 +11,7 @@ import {
   RefreshCcw,
 } from "lucide-react";
 import { openPath } from "@tauri-apps/plugin-opener";
+import { getVersion } from "@tauri-apps/api/app";
 
 import "./App.css";
 import { Sidebar } from "./components/Sidebar";
@@ -363,28 +364,78 @@ export default function App() {
   });
   const [readyVersion, setReadyVersion] = useState("");
   const readyUpdateRef = useRef<ReadyUpdate | null>(null);
+  // Set while a manual check from the sidebar footer is in flight, so the
+  // button can show a spinner and ignore repeat clicks.
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [appVersion, setAppVersion] = useState("");
 
+  // True while a check was started from the sidebar button; decides whether
+  // "no update found" gets a toast (manual) or stays silent (startup poll).
+  const manualCheckRef = useRef(false);
+
+  const runUpdateCheck = useCallback(() => {
+    setUpdatePhase("downloading");
+    checkAndDownload(({ received, total }) => {
+      // The card only appears once the download finished, but keep the
+      // progress state current in case it's ever rendered mid-flight.
+      setUpdateProgress({ received, total });
+    })
+      .then((u) => {
+        setCheckingUpdate(false);
+        if (!u) {
+          setUpdatePhase("idle");
+          if (manualCheckRef.current) setStatus("已是最新版本");
+          return;
+        }
+        readyUpdateRef.current = u;
+        setReadyVersion(u.version);
+        // Drop the "checking…" toast so it doesn't float over the card.
+        setStatus(null);
+        setUpdatePhase("ready");
+      })
+      .catch(() => {
+        setCheckingUpdate(false);
+        setUpdatePhase("idle");
+      });
+  }, []);
+
+  // Startup check: a few seconds after launch so it never competes with the
+  // initial listing for network or CPU. Silent — no update means no UI.
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      setUpdatePhase("downloading");
-      checkAndDownload(({ received, total }) => {
-        // The card only appears once the download finished, but keep the
-        // progress state current in case it's ever rendered mid-flight.
-        setUpdateProgress({ received, total });
-      })
-        .then((u) => {
-          if (!u) {
-            setUpdatePhase("idle");
-            return;
-          }
-          readyUpdateRef.current = u;
-          setReadyVersion(u.version);
-          setUpdatePhase("ready");
-        })
-        .catch(() => setUpdatePhase("idle"));
+      manualCheckRef.current = false;
+      runUpdateCheck();
     }, 4000);
     return () => window.clearTimeout(timer);
+  }, [runUpdateCheck]);
+
+  // The bundle version, shown next to the manual check entry. Resolves to
+  // the same value as tauri.conf.json in packaged builds.
+  useEffect(() => {
+    getVersion()
+      .then(setAppVersion)
+      .catch(() => setAppVersion(""));
   }, []);
+
+  const handleManualCheck = useCallback(() => {
+    // A finished download stays cached, so re-checking can just re-show the
+    // install card without touching the network again.
+    if (updatePhase === "ready" || updatePhase === "installing") {
+      if (readyUpdateRef.current) setUpdatePhase("ready");
+      return;
+    }
+    if (checkingUpdate || updatePhase === "downloading") return;
+    if (import.meta.env.DEV) {
+      // The updater is inert in debug builds, so skip the pointless round
+      // trip and say so instead of silently reporting "already current".
+      setStatus("开发模式构建不支持检查更新");
+      return;
+    }
+    setCheckingUpdate(true);
+    manualCheckRef.current = true;
+    setStatus("正在检查更新…");
+    runUpdateCheck();
+  }, [checkingUpdate, runUpdateCheck, updatePhase]);
 
   const dismissUpdate = useCallback(() => {
     // The bytes are already verified and on disk; refusing to install now
@@ -1846,6 +1897,26 @@ export default function App() {
           onSelectProfile={handleSelectProfile}
           onDisconnect={handleDisconnect}
         />
+        {/* Bottom-left strip: current version plus a manual update check for
+            users who don't want to wait for the silent startup poll. */}
+        <footer className="sidebar-footer">
+          <span className="app-version">v{appVersion || "dev"}</span>
+          <button
+            type="button"
+            className="btn ghost small"
+            onClick={handleManualCheck}
+            disabled={checkingUpdate}
+          >
+            {checkingUpdate ? (
+              <>
+                <Loader2 size={12} className="spin" />
+                检查中…
+              </>
+            ) : (
+              "检查更新"
+            )}
+          </button>
+        </footer>
       </aside>
 
       <main className="main">
@@ -2038,9 +2109,9 @@ export default function App() {
           <div className="modal prompt-dialog update-dialog">
             <div className="modal-header">
               <h2>
-                {updatePhase === "ready" || updatePhase === "installing"
-                  ? `SuperFTP ${readyVersion} 已就绪`
-                  : "正在下载新版本…"}
+                {updatePhase === "downloading"
+                  ? "正在下载新版本…"
+                  : `SuperFTP ${readyVersion} 已就绪`}
               </h2>
             </div>
             <div className="form">
